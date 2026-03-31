@@ -88,6 +88,27 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     bash /tmp/install_vllm_omni.sh
 
 {% endif %}
+
+{% if device == "xpu" %}
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    #ffmpeg \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    numactl \
+    wget \
+    vim \
+    linux-libc-dev && \
+    # Install Intel GPU runtime packages
+    apt-get install -y --allow-downgrades libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing \
+    intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 \
+    xpu-smi=1.3.6-1~24.04~ppa1 libxpum1=1.3.6-1~24.04~ppa1 \
+    libigsc0=0.9.5-1~24.04~ppa2 libmetee5=5.0.0-1~24.04~ppa2 libmetee-dev=5.0.0-1~24.04~ppa2 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+{% endif %}
 {% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}
