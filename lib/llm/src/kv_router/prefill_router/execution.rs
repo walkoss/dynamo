@@ -330,7 +330,6 @@ impl PrefillRouter {
                         lora_name,
                         priority_jump,
                         None,
-                        None,
                         allowed_worker_ids,
                     )
                     .await?;
