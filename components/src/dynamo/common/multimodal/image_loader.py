@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+# UUID-only variant: no payload, the backend looks up the cache key in vLLM's
+# mm_processor_cache. The slot is a placeholder; the uuid is forwarded through
+# `multi_modal_uuids`.
+UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 
 
 class ImageLoader:
@@ -221,12 +225,19 @@ class ImageLoader:
             Exception: If any image fails to load
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
         """
-        image_futures = []
+        # Async future per loadable item; UuidOnly slots are recorded as a
+        # sentinel index that maps to a `None` entry in the result list (vLLM's
+        # mm_processor_cache will look it up by uuid via multi_modal_uuids).
+        image_futures: list[Any] = []
+        # For each input item, an int index into image_futures or the literal
+        # None sentinel (uuid-only).
+        slot_to_future_idx: list[int | None] = []
 
         for item in image_mm_items:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 # URL path: download and decode in Python backend
                 url = item[URL_VARIANT_KEY]
+                slot_to_future_idx.append(len(image_futures))
                 image_futures.append(self.load_image(url))
                 logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
@@ -234,6 +245,7 @@ class ImageLoader:
                     metadata = item[DECODED_VARIANT_KEY]
                     if self._nixl_connector is None:
                         raise RuntimeError("NIXL connector is not initialized")
+                    slot_to_future_idx.append(len(image_futures))
                     image_futures.append(self._read_and_convert_nixl_image(metadata))
                 else:
                     logger.error(
@@ -241,12 +253,26 @@ class ImageLoader:
                         "Set enable_frontend_decoding=True to enable NIXL RDMA image transfer."
                     )
                     raise ValueError("Could not load decoded media from frontend")
+            elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
+                # UUID-only slot: no payload to fetch. The caller carries the
+                # uuid in `multi_modal_uuids` so vLLM's mm_processor_cache can
+                # resolve it. Record a None sentinel slot here so result
+                # alignment with `image_mm_items` is preserved.
+                slot_to_future_idx.append(None)
+                logger.debug(
+                    f"UUID-only image slot (cache lookup): {item[UUID_ONLY_VARIANT_KEY]}"
+                )
 
-        # Process images in parallel
+        # Process futures in parallel; weave None back in for uuid-only slots
         results = await asyncio.gather(*image_futures, return_exceptions=True)
-        loaded_images = []
+        loaded_images: list[Any] = []
         collective_exceptions = ""
-        for media_item, result in zip(image_mm_items, results):
+        for media_item, fut_idx in zip(image_mm_items, slot_to_future_idx):
+            if fut_idx is None:
+                # uuid-only sentinel — vLLM resolves this via multi_modal_uuids
+                loaded_images.append(None)
+                continue
+            result = results[fut_idx]
             if isinstance(result, Exception):
                 source = media_item.get(URL_VARIANT_KEY, "decoded")
                 logger.error(f"Failed to load image from {source[:80]}...: {result}")

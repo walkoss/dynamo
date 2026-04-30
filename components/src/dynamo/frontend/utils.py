@@ -44,21 +44,29 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 
 def extract_mm_urls(
     messages: list[dict[str, Any]],
-) -> dict[str, list[dict[str, str]]] | None:
-    """Extract multimodal URLs from OpenAI chat completion messages.
+) -> tuple[dict[str, list[dict[str, Any]]] | None, dict[str, list[str | None]] | None,]:
+    """Extract multimodal URLs (and OpenAI cached-MM `uuid`s) from chat messages.
 
-    Walks user message content arrays and collects ``image_url``, ``audio_url``,
-    and ``video_url`` entries.  Returns them in the format expected by the
-    backend handler's ``_extract_multimodal_data()``::
+    Walks user-message content arrays and collects ``image_url``, ``audio_url``,
+    and ``video_url`` entries. Each part is one of:
 
-        {
-            "image_url": [{"Url": "https://..."}, ...],
-            "audio_url": [{"Url": "data:audio/wav;base64,..."}],
-        }
+    - ``{url}`` (no uuid)    → ``{"Url": url}`` slot
+    - ``{url, uuid}``        → ``{"Url": url}`` slot, uuid stored parallel
+    - ``{uuid}`` (no url)    → ``{"UuidOnly": uuid}`` slot — backend resolves
+                               via vLLM's mm_processor_cache.
 
-    Returns ``None`` if no multimodal content is found.
+    Returns ``(mm_data, mm_uuids)``:
+
+    - ``mm_data`` matches the pre-PR shape for url-only callers; gains
+      ``UuidOnly`` entries when uuid-only parts are present. ``None`` if no
+      multimodal content was found.
+    - ``mm_uuids`` is the parallel per-modality list of ``str | None`` aligned
+      with ``mm_data[modality]``. Forward via ``extra_args["mm_hashes"]`` so the
+      worker pipes it into vLLM's ``multi_modal_uuids``. ``None`` if no part
+      carried a uuid (preserves the pre-PR wire shape).
     """
-    mm_data: dict[str, list[dict[str, str]]] = {}
+    mm_data: dict[str, list[dict[str, Any]]] = {}
+    mm_uuids: dict[str, list[str | None]] = {}
 
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("role") != "user":
@@ -76,10 +84,24 @@ def extract_mm_urls(
             if not isinstance(media_value, dict):
                 continue
             url = media_value.get("url")
-            if isinstance(url, str) and url:
-                mm_data.setdefault(part_type, []).append({"Url": url})
+            uuid = media_value.get("uuid")
+            url_present = isinstance(url, str) and bool(url)
+            uuid_present = isinstance(uuid, str) and bool(uuid)
 
-    return mm_data or None
+            if not url_present and not uuid_present:
+                # Defensive skip; Rust preprocessor rejects empty parts upstream.
+                continue
+
+            if url_present:
+                mm_data.setdefault(part_type, []).append({"Url": url})
+            else:
+                mm_data.setdefault(part_type, []).append({"UuidOnly": uuid})
+            mm_uuids.setdefault(part_type, []).append(uuid if uuid_present else None)
+
+    if not mm_data:
+        return None, None
+    any_uuid = any(any(u is not None for u in v) for v in mm_uuids.values())
+    return mm_data, (mm_uuids if any_uuid else None)
 
 
 def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:

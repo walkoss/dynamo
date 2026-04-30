@@ -178,7 +178,7 @@ fn convert_user_blocks(
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
                         image_url: ImageUrl {
-                            url,
+                            url: Some(url),
                             detail: None,
                             uuid: None,
                         },
@@ -1657,7 +1657,12 @@ mod tests {
                     // Second part: image with data URI
                     match &parts[1] {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
-                            let url_str = img.image_url.url.to_string();
+                            let url_str = img
+                                .image_url
+                                .url
+                                .as_ref()
+                                .expect("image_url.url required for anthropic image conversion")
+                                .to_string();
                             assert!(
                                 url_str.starts_with("data:image/png;base64,"),
                                 "expected data URI, got: {url_str}"

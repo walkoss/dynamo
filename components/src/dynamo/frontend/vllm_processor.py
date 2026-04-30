@@ -421,9 +421,20 @@ class VllmProcessor:
             )
             all_transferred = nixl_transferred and n_with_data == n_features
             if not all_transferred:
-                mm_data = extract_mm_urls(request.get("messages") or [])
+                mm_data, mm_uuids = extract_mm_urls(request.get("messages") or [])
                 if mm_data:
                     dynamo_preproc["multi_modal_data"] = mm_data
+                if mm_uuids:
+                    # Forward image-modality uuids via extra_args["mm_hashes"]
+                    # so the worker (handlers.py) routes them into vLLM's
+                    # multi_modal_uuids. Only set when at least one part
+                    # carried a uuid — otherwise pre-PR shape is preserved
+                    # and `_prepare_mm_routing` may have already populated
+                    # mm_hashes from vLLM's mm_features.
+                    extra_args = dynamo_preproc.setdefault("extra_args", {})
+                    image_uuids = mm_uuids.get("image_url")
+                    if image_uuids is not None and "mm_hashes" not in extra_args:
+                        extra_args["mm_hashes"] = image_uuids
 
             # Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
             if request_for_sampling.mm_processor_kwargs is not None:

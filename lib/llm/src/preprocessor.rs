@@ -41,7 +41,7 @@ use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
+    MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -420,8 +420,14 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<String>,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
-            Vec::new();
+        let mut uuid_map: MultimodalUuidMap = HashMap::new();
+        // Per-modality slot index for inserting Decoded results back at the
+        // correct position alongside any UuidOnly slots seen earlier.
+        let mut fetch_tasks: Vec<(
+            String,
+            usize,
+            &ChatCompletionRequestUserMessageContentPart,
+        )> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
             return Ok(());
@@ -437,31 +443,56 @@ impl OpenAIPreprocessor {
                 _ => continue,
             };
             for content_part in content_parts.iter() {
-                if has_media_loader {
-                    let type_str = match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
-                        ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => "video_url",
-                        ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
-                        _ => continue,
-                    };
-                    fetch_tasks.push((type_str.to_string(), content_part));
-                } else {
-                    let (type_str, url) = match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                            ("image_url", p.image_url.url.clone())
+                let (type_str, url, uuid) = match content_part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => (
+                        "image_url",
+                        p.image_url.url.clone(),
+                        p.image_url.uuid,
+                    ),
+                    ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => (
+                        "video_url",
+                        p.video_url.url.clone(),
+                        p.video_url.uuid,
+                    ),
+                    ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => (
+                        "audio_url",
+                        p.audio_url.url.clone(),
+                        p.audio_url.uuid,
+                    ),
+                    _ => continue,
+                };
+
+                let slot_idx = media_map.entry(type_str.to_string()).or_default().len();
+                uuid_map.entry(type_str.to_string()).or_default().push(uuid);
+
+                match (url, uuid) {
+                    (Some(url_val), _) => {
+                        if has_media_loader {
+                            // Reserve the slot now (placeholder). Decoded result
+                            // is written back at the same index after fetch.
+                            media_map
+                                .entry(type_str.to_string())
+                                .or_default()
+                                .push(MultimodalData::Url(url_val.clone()));
+                            fetch_tasks.push((type_str.to_string(), slot_idx, content_part));
+                        } else {
+                            media_map
+                                .entry(type_str.to_string())
+                                .or_default()
+                                .push(MultimodalData::Url(url_val));
                         }
-                        ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
-                            ("video_url", p.video_url.url.clone())
-                        }
-                        ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => {
-                            ("audio_url", p.audio_url.url.clone())
-                        }
-                        _ => continue,
-                    };
-                    media_map
-                        .entry(type_str.to_string())
-                        .or_default()
-                        .push(MultimodalData::Url(url));
+                    }
+                    (None, Some(uuid_val)) => {
+                        media_map
+                            .entry(type_str.to_string())
+                            .or_default()
+                            .push(MultimodalData::UuidOnly(uuid_val));
+                    }
+                    (None, None) => {
+                        bail!(
+                            "{type_str} part has neither `url` nor `uuid` — at least one is required"
+                        );
+                    }
                 }
             }
         }
@@ -470,23 +501,30 @@ impl OpenAIPreprocessor {
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
-            let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
-                loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
-            }))
+            let results = futures::future::join_all(fetch_tasks.iter().map(
+                |(_, _, content_part)| {
+                    loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
+                },
+            ))
             .await;
 
-            for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
+            for ((type_str, slot_idx, _), result) in fetch_tasks.into_iter().zip(results.into_iter())
+            {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
-                media_map
-                    .entry(type_str)
-                    .or_default()
-                    .push(MultimodalData::Decoded(rdma_descriptor));
+                let entry = media_map
+                    .get_mut(&type_str)
+                    .expect("modality must exist after fetch_task placeholder push");
+                entry[slot_idx] = MultimodalData::Decoded(rdma_descriptor);
             }
         }
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
+
+            // Forward UUIDs to the worker only when at least one part carried a
+            // uuid; aligned by index with multi_modal_data entries.
+            let any_uuid = uuid_map.values().any(|v| v.iter().any(|u| u.is_some()));
 
             // Preserve original messages and formatted prompt in extra_args for multimodal
             // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
@@ -506,6 +544,25 @@ impl OpenAIPreprocessor {
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
             }
+
+            // Forward image uuids to the dynamo.vllm worker via the existing
+            // `extra_args["mm_hashes"]` transport. The worker (handlers.py)
+            // already pipes this list into vLLM's `multi_modal_uuids`. `null`
+            // entries are passed through for slots without a uuid.
+            if any_uuid {
+                if let Some(image_uuids) = uuid_map.get("image_url") {
+                    let image_hashes: Vec<serde_json::Value> = image_uuids
+                        .iter()
+                        .map(|u| match u {
+                            Some(uuid) => serde_json::Value::String(uuid.to_string()),
+                            None => serde_json::Value::Null,
+                        })
+                        .collect();
+                    extra_args["mm_hashes"] = serde_json::Value::Array(image_hashes);
+                }
+                builder.multi_modal_uuids(Some(uuid_map));
+            }
+
             builder.extra_args(Some(extra_args));
         }
 

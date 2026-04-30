@@ -289,7 +289,7 @@ fn convert_input_content_to_user_content(
                 chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
                         image_url: ImageUrl {
-                            url,
+                            url: Some(url),
                             detail: Some(convert_image_detail_str(&img.detail)),
                             uuid: None,
                         },

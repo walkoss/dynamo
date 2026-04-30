@@ -335,3 +335,90 @@ async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
     assert "https://example.com/b.png" not in loader._image_cache
     assert "https://example.com/c.png" in loader._image_cache
     assert "https://example.com/d.png" in loader._image_cache
+
+
+# --- UuidOnly variant (cached-MM passthrough) ---
+
+
+async def test_load_image_batch_uuid_only_returns_none_slot(
+    loader: ImageLoader,
+) -> None:
+    """UuidOnly slot must produce a None entry — vLLM's mm_processor_cache resolves it."""
+    items = [{"UuidOnly": "img-aabbccdd"}]
+    result = await loader.load_image_batch(items)
+    assert result == [None]
+
+
+async def test_load_image_batch_mixed_url_and_uuid_only(loader: ImageLoader) -> None:
+    """5 images: 1 fresh url, 4 uuid-only repeats — slot alignment preserved."""
+    mock_client = _mock_http_client()
+    with patch(
+        "dynamo.common.multimodal.image_loader.get_http_client",
+        return_value=mock_client,
+    ):
+        items = [
+            {"Url": "https://example.com/new.png"},
+            {"UuidOnly": "img-rep1"},
+            {"UuidOnly": "img-rep2"},
+            {"UuidOnly": "img-rep3"},
+            {"UuidOnly": "img-rep4"},
+        ]
+        result = await loader.load_image_batch(items)
+
+    assert len(result) == 5
+    # Slot 0 → loaded PIL image; slots 1–4 → None sentinel for cache lookup.
+    assert isinstance(result[0], Image.Image)
+    assert result[1] is None
+    assert result[2] is None
+    assert result[3] is None
+    assert result[4] is None
+
+
+async def test_load_image_batch_five_images_four_overlapping_same_uuid(
+    loader: ImageLoader,
+) -> None:
+    """
+    Pinned-image scenario: first turn decoded with url, all 4 follow-ups
+    reference the exact same uuid. The loader returns None for each repeat,
+    relying on vLLM's processor cache for resolution.
+    """
+    mock_client = _mock_http_client()
+    with patch(
+        "dynamo.common.multimodal.image_loader.get_http_client",
+        return_value=mock_client,
+    ):
+        items = [
+            {"Url": "https://example.com/img.png"},
+            {"UuidOnly": "img-aa"},
+            {"UuidOnly": "img-aa"},
+            {"UuidOnly": "img-aa"},
+            {"UuidOnly": "img-aa"},
+        ]
+        result = await loader.load_image_batch(items)
+
+    assert len(result) == 5
+    assert isinstance(result[0], Image.Image)
+    assert all(r is None for r in result[1:]), "all 4 repeats must be None sentinel"
+
+
+async def test_load_image_batch_all_uuid_only_no_http_fetch(
+    loader: ImageLoader,
+) -> None:
+    """All-uuid request must not touch the HTTP client."""
+    mock_client = _mock_http_client()
+    with patch(
+        "dynamo.common.multimodal.image_loader.get_http_client",
+        return_value=mock_client,
+    ) as patched:
+        items = [
+            {"UuidOnly": "img-1"},
+            {"UuidOnly": "img-2"},
+            {"UuidOnly": "img-3"},
+        ]
+        result = await loader.load_image_batch(items)
+
+    assert result == [None, None, None]
+    # get_http_client may be referenced (lazy attribute) but no .get() call should happen.
+    mock_client.get.assert_not_awaited()
+    mock_client.send.assert_not_awaited()
+    patched.assert_not_called()  # the loader skips HTTP entirely on uuid-only batches

@@ -115,10 +115,19 @@ pub enum MultimodalData {
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
+    /// UUID-only multimodal slot — no payload, the backend looks the cache key
+    /// up in its mm_processor_cache (vLLM's OpenAI cached-MM extension). Cache
+    /// hit → success; cache miss → backend returns an error response.
+    UuidOnly(uuid::Uuid),
 }
 
 // multimodal map containing {mm_part_type: [data...]}
 pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
+
+// Per-modality list of optional UUIDs aligned with [`MultimodalDataMap`] entries.
+// Same modality key (`image_url`, `video_url`, `audio_url`); same length/index as
+// `multi_modal_data[modality]`. `None` slots mean "no UUID supplied for this part".
+pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<uuid::Uuid>>>;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
@@ -140,6 +149,14 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// Per-modality UUIDs aligned with [`Self::multi_modal_data`] entries. Set
+    /// when the request carries OpenAI cached-MM `uuid` fields per image part.
+    /// The worker forwards these to the backend via `extra_args["mm_hashes"]`,
+    /// which becomes vLLM's `multi_modal_uuids`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_uuids: Option<MultimodalUuidMap>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]

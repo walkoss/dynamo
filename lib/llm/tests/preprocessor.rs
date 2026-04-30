@@ -611,6 +611,33 @@ fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
     )
 }
 
+// Helper for cached-MM test: each part is either {url, uuid}, {url}, or {uuid}.
+// `Some(url)` & `Some(uuid)` -> both fields, `Some(url)` only -> url only,
+// `None` & `Some(uuid)` -> uuid-only.
+fn build_message_with_uuids(
+    text: &str,
+    image_parts: &[(Option<&str>, Option<&str>)],
+) -> String {
+    let mut content_parts = vec![format!(r#"{{"type": "text", "text": "{}"}}"#, text)];
+    for (url, uuid) in image_parts {
+        let mut fields: Vec<String> = Vec::new();
+        if let Some(u) = url {
+            fields.push(format!(r#""url": "{}""#, u));
+        }
+        if let Some(id) = uuid {
+            fields.push(format!(r#""uuid": "{}""#, id));
+        }
+        content_parts.push(format!(
+            r#"{{"type": "image_url", "image_url": {{{}}}}}"#,
+            fields.join(", ")
+        ));
+    }
+    format!(
+        r#"[{{"role": "user", "content": [{}]}}]"#,
+        content_parts.join(", ")
+    )
+}
+
 /// Test the preprocessor with multimodal data (single and mixed types) to verify gather_multi_modal_data code path
 #[rstest]
 // No media case
@@ -674,7 +701,251 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
                 );
             }
         }
+
+        // No uuids in this test set → no `multi_modal_uuids` map and no
+        // `extra_args["mm_hashes"]` key. Backwards-compat invariant.
+        assert!(
+            preprocessed.multi_modal_uuids.is_none(),
+            "multi_modal_uuids must stay None when no uuid was supplied"
+        );
+        if let Some(extra) = preprocessed.extra_args.as_ref() {
+            assert!(
+                extra.get("mm_hashes").is_none(),
+                "extra_args.mm_hashes must be absent when no uuid was supplied"
+            );
+        }
     }
+}
+
+/// Cached-MM scenarios: 5 images per request, with mixes of url-only,
+/// url+uuid, and uuid-only parts. Asserts the preprocessor populates
+/// `multi_modal_data`, `multi_modal_uuids`, and `extra_args["mm_hashes"]`
+/// correctly.
+#[rstest]
+// 1 image, url only — sanity: no uuid, no mm_hashes (backwards-compat)
+#[case::one_url_only(
+    &[(Some("https://example.com/img1.jpg"), None)],
+    &[None],
+    None
+)]
+// 1 image, url + uuid — single uuid forwarded
+#[case::one_url_and_uuid(
+    &[(Some("https://example.com/img1.jpg"), Some("00000000-0000-0000-0000-000000000001"))],
+    &[Some("00000000-0000-0000-0000-000000000001")],
+    Some(vec![Some("00000000-0000-0000-0000-000000000001")])
+)]
+// 1 image, uuid-only — no decode, uuid still forwarded
+#[case::one_uuid_only(
+    &[(None, Some("00000000-0000-0000-0000-0000000000ff"))],
+    &[Some("00000000-0000-0000-0000-0000000000ff")],
+    Some(vec![Some("00000000-0000-0000-0000-0000000000ff")])
+)]
+// 5 images per request, 4 of them are uuid-only repeats of the first (the
+// "uuid-and-strip" cached-MM scenario from aiperf #869). Each repeat carries
+// the same uuid as the leading image; the request's full uuid list is the same
+// uuid 5 times. The leading image is url+uuid; the rest are uuid-only.
+#[case::five_with_four_overlapping_uuid_only(
+    &[
+        (Some("https://example.com/img1.jpg"), Some("00000000-0000-0000-0000-0000000000aa")),
+        (None, Some("00000000-0000-0000-0000-0000000000aa")),
+        (None, Some("00000000-0000-0000-0000-0000000000aa")),
+        (None, Some("00000000-0000-0000-0000-0000000000aa")),
+        (None, Some("00000000-0000-0000-0000-0000000000aa")),
+    ],
+    &[
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+    ],
+    Some(vec![
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+        Some("00000000-0000-0000-0000-0000000000aa"),
+    ])
+)]
+// 5 images per request: 1 fresh url+uuid + 4 distinct uuid-only repeats from a
+// prior conversation (sliding-window style: cache must already be warmed for
+// these 4 from previous requests; this preprocessor test only validates the
+// passthrough — the actual cache hit/miss is the backend's job).
+#[case::five_one_fresh_four_uuid_only_distinct(
+    &[
+        (Some("https://example.com/new.jpg"), Some("00000000-0000-0000-0000-000000000005")),
+        (None, Some("00000000-0000-0000-0000-000000000001")),
+        (None, Some("00000000-0000-0000-0000-000000000002")),
+        (None, Some("00000000-0000-0000-0000-000000000003")),
+        (None, Some("00000000-0000-0000-0000-000000000004")),
+    ],
+    &[
+        Some("00000000-0000-0000-0000-000000000005"),
+        Some("00000000-0000-0000-0000-000000000001"),
+        Some("00000000-0000-0000-0000-000000000002"),
+        Some("00000000-0000-0000-0000-000000000003"),
+        Some("00000000-0000-0000-0000-000000000004"),
+    ],
+    Some(vec![
+        Some("00000000-0000-0000-0000-000000000005"),
+        Some("00000000-0000-0000-0000-000000000001"),
+        Some("00000000-0000-0000-0000-000000000002"),
+        Some("00000000-0000-0000-0000-000000000003"),
+        Some("00000000-0000-0000-0000-000000000004"),
+    ])
+)]
+#[tokio::test]
+async fn test_media_url_uuid_passthrough(
+    #[case] image_parts: &[(Option<&str>, Option<&str>)],
+    #[case] expected_uuids_aligned: &[Option<&str>],
+    #[case] expected_mm_hashes: Option<Vec<Option<&str>>>,
+) {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::protocols::common::preprocessor::{
+        MultimodalData, PreprocessedRequestBuilder,
+    };
+
+    // Use the local mock-llama MDC. It's text-only on the model side, but the
+    // preprocessor's `gather_multi_modal_data` only walks the request's message
+    // content array — model multimodality isn't a precondition. This keeps the
+    // unit test offline (no HF download, no gated model).
+    const MOCK_MDC_PATH: &str =
+        "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    let mdc = ModelDeploymentCard::load_from_disk(MOCK_MDC_PATH, None)
+        .expect("mock-llama sample MDC must be present on disk");
+
+    let preprocessor = dynamo_llm::preprocessor::OpenAIPreprocessor::new(mdc.clone()).unwrap();
+
+    {
+        let message = build_message_with_uuids("describe these", image_parts);
+        let request = Request::from(&message, None, None, mdc.slug().to_string());
+
+        // Call `gather_multi_modal_data` directly — bypass tokenize / chat
+        // template / context-length checks that aren't relevant to the uuid
+        // passthrough path.
+        let mut builder = PreprocessedRequestBuilder::default();
+        builder
+            .model("test-model".to_string())
+            .token_ids(Vec::<u32>::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+        preprocessor
+            .gather_multi_modal_data(&request, &mut builder, None)
+            .await
+            .expect("gather_multi_modal_data must succeed");
+        let preprocessed = builder.build().expect("builder.build()");
+
+        let media_map = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .expect("multi_modal_data must be present");
+        let images = media_map
+            .get("image_url")
+            .expect("image_url modality must be present");
+        assert_eq!(
+            images.len(),
+            image_parts.len(),
+            "image part count mismatch"
+        );
+
+        // Per-slot variant assertion: url-bearing parts → Url, uuid-only → UuidOnly.
+        for (i, (url, _)) in image_parts.iter().enumerate() {
+            match (&images[i], url.is_some()) {
+                (MultimodalData::Url(_), true) | (MultimodalData::Decoded(_), true) => {}
+                (MultimodalData::UuidOnly(_), false) => {}
+                (variant, has_url) => panic!(
+                    "slot {} variant mismatch: variant={:?}, has_url={}",
+                    i, variant, has_url
+                ),
+            }
+        }
+
+        // multi_modal_uuids alignment
+        let any_uuid = expected_uuids_aligned.iter().any(|u| u.is_some());
+        if any_uuid {
+            let uuids_map = preprocessed
+                .multi_modal_uuids
+                .as_ref()
+                .expect("multi_modal_uuids must be present when any uuid supplied");
+            let uuids = uuids_map
+                .get("image_url")
+                .expect("image_url uuids must be present");
+            assert_eq!(uuids.len(), expected_uuids_aligned.len());
+            for (i, expected) in expected_uuids_aligned.iter().enumerate() {
+                let got = uuids[i].map(|u| u.to_string());
+                let want = expected.map(|s| s.to_string());
+                assert_eq!(got, want, "uuid mismatch at slot {}", i);
+            }
+        } else {
+            assert!(
+                preprocessed.multi_modal_uuids.is_none(),
+                "multi_modal_uuids must be None when no uuid was supplied"
+            );
+        }
+
+        // extra_args["mm_hashes"] alignment (this is the transport the
+        // dynamo.vllm worker actually consumes — verify it carries the same
+        // list as multi_modal_uuids["image_url"]).
+        let extra = preprocessed.extra_args.as_ref().unwrap();
+        match expected_mm_hashes {
+            Some(ref expected) => {
+                let arr = extra
+                    .get("mm_hashes")
+                    .and_then(|v| v.as_array())
+                    .expect("extra_args.mm_hashes must be a list when uuids present");
+                assert_eq!(arr.len(), expected.len());
+                for (i, want) in expected.iter().enumerate() {
+                    match (arr.get(i), want) {
+                        (Some(serde_json::Value::String(got)), Some(want_s)) => {
+                            assert_eq!(got, want_s, "mm_hashes[{}] mismatch", i);
+                        }
+                        (Some(serde_json::Value::Null), None) => {}
+                        (got, want) => {
+                            panic!("mm_hashes[{}] mismatch: got={:?} want={:?}", i, got, want)
+                        }
+                    }
+                }
+            }
+            None => {
+                assert!(
+                    extra.get("mm_hashes").is_none(),
+                    "extra_args.mm_hashes must be absent when no uuid was supplied"
+                );
+            }
+        }
+    }
+}
+
+/// Negative case: an `image_url` part with neither `url` nor `uuid` must error.
+#[tokio::test]
+async fn test_image_url_without_url_or_uuid_errors() {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::protocols::common::preprocessor::PreprocessedRequestBuilder;
+
+    const MOCK_MDC_PATH: &str =
+        "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    let mdc = ModelDeploymentCard::load_from_disk(MOCK_MDC_PATH, None)
+        .expect("mock-llama sample MDC must be present on disk");
+    let preprocessor = dynamo_llm::preprocessor::OpenAIPreprocessor::new(mdc.clone()).unwrap();
+
+    let message = build_message_with_uuids("oops", &[(None, None)]);
+    let request = Request::from(&message, None, None, mdc.slug().to_string());
+
+    let mut builder = PreprocessedRequestBuilder::default();
+    builder
+        .model("test-model".to_string())
+        .token_ids(Vec::<u32>::new())
+        .stop_conditions(Default::default())
+        .sampling_options(Default::default())
+        .output_options(Default::default());
+    let result = preprocessor
+        .gather_multi_modal_data(&request, &mut builder, None)
+        .await;
+    assert!(
+        result.is_err(),
+        "request with no url and no uuid must return an error"
+    );
 }
 
 mod context_length_validation {

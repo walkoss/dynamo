@@ -199,7 +199,10 @@ pub struct ChatCompletionRequestMessageContentPartImage {
 /// Image URL with `url::Url` type and optional UUID.
 ///
 /// Differs from upstream: uses `url::Url` instead of `String`, adds `uuid` field
-/// for tracking multimodal assets through the pipeline.
+/// for tracking multimodal assets through the pipeline. `url` and `uuid` are
+/// both individually optional — at least one must be present, validated at the
+/// preprocessor (uuid-only parts are looked up in the backend's MM processor
+/// cache; the OpenAI cached-MM extension).
 #[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "ImageUrlArgs")]
 #[builder(pattern = "mutable")]
@@ -207,7 +210,8 @@ pub struct ChatCompletionRequestMessageContentPartImage {
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ImageUrl {
-    pub url: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<Url>,
     pub detail: Option<ImageDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<Uuid>,
@@ -406,7 +410,8 @@ pub enum ChatCompletionMessageContent {
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct VideoUrl {
-    pub url: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<Url>,
     pub detail: Option<ImageDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<Uuid>,
@@ -429,7 +434,8 @@ pub struct ChatCompletionRequestMessageContentPartVideo {
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct AudioUrl {
-    pub url: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<Url>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<Uuid>,
 }
@@ -940,5 +946,130 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(delta.arguments.as_deref(), Some("{\"location\":\"SF\"}"));
+    }
+
+    // -- ImageUrl optional-url + uuid (cached-MM extension) tests --
+
+    fn parse_image_url(json: serde_json::Value) -> ImageUrl {
+        serde_json::from_value(json).expect("ImageUrl deserialization failed")
+    }
+
+    #[test]
+    fn image_url_url_only() {
+        let img = parse_image_url(serde_json::json!({"url": "https://x.example/y.png"}));
+        assert!(img.url.is_some());
+        assert_eq!(
+            img.url.as_ref().map(|u| u.as_str()),
+            Some("https://x.example/y.png")
+        );
+        assert_eq!(img.uuid, None);
+    }
+
+    #[test]
+    fn image_url_url_and_uuid() {
+        let img = parse_image_url(serde_json::json!({
+            "url": "https://x.example/y.png",
+            "uuid": "00000000-0000-0000-0000-0000000000ff"
+        }));
+        assert!(img.url.is_some());
+        assert!(img.uuid.is_some());
+    }
+
+    #[test]
+    fn image_url_uuid_only() {
+        let img = parse_image_url(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-0000000000ff"
+        }));
+        assert!(img.url.is_none(), "uuid-only part must deserialize without url");
+        assert!(img.uuid.is_some());
+    }
+
+    #[test]
+    fn image_url_neither_url_nor_uuid_deserializes_but_is_invalid() {
+        // The type stays permissive; the preprocessor rejects empty parts at
+        // use-site rather than at the wire boundary.
+        let img = parse_image_url(serde_json::json!({}));
+        assert!(img.url.is_none());
+        assert!(img.uuid.is_none());
+    }
+
+    #[test]
+    fn image_url_serialize_uuid_only_omits_url() {
+        use uuid::Uuid;
+        let img = ImageUrl {
+            url: None,
+            detail: None,
+            uuid: Some(Uuid::nil()),
+        };
+        let json = serde_json::to_value(&img).unwrap();
+        assert!(json.get("url").is_none(), "url field must be omitted when None");
+        assert_eq!(json["uuid"], "00000000-0000-0000-0000-000000000000");
+    }
+
+    #[test]
+    fn image_url_serialize_url_only_omits_uuid() {
+        let img: ImageUrl = "https://x.example/y.png".into();
+        let json = serde_json::to_value(&img).unwrap();
+        assert_eq!(json["url"], "https://x.example/y.png");
+        assert!(json.get("uuid").is_none(), "uuid field must be omitted when None");
+    }
+
+    #[test]
+    fn video_url_uuid_only() {
+        let v: VideoUrl = serde_json::from_value(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-0000000000ff"
+        }))
+        .unwrap();
+        assert!(v.url.is_none());
+        assert!(v.uuid.is_some());
+    }
+
+    #[test]
+    fn audio_url_uuid_only() {
+        let a: AudioUrl = serde_json::from_value(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-0000000000ff"
+        }))
+        .unwrap();
+        assert!(a.url.is_none());
+        assert!(a.uuid.is_some());
+    }
+
+    #[test]
+    fn image_url_in_message_content_array_uuid_only() {
+        // End-to-end shape: a chat completions request user message with one
+        // text part and two image parts — first {url+uuid}, second {uuid only}
+        let payload = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe these"},
+                {"type": "image_url", "image_url": {
+                    "url": "https://x.example/img1.png",
+                    "uuid": "00000000-0000-0000-0000-000000000001"
+                }},
+                {"type": "image_url", "image_url": {
+                    "uuid": "00000000-0000-0000-0000-000000000001"
+                }}
+            ]
+        });
+        let msg: ChatCompletionRequestUserMessage = serde_json::from_value(payload).unwrap();
+        let parts = match msg.content {
+            ChatCompletionRequestUserMessageContent::Array(p) => p,
+            _ => panic!("expected Array content"),
+        };
+        assert_eq!(parts.len(), 3);
+        match &parts[1] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                assert!(p.image_url.url.is_some());
+                assert!(p.image_url.uuid.is_some());
+            }
+            _ => panic!("parts[1] should be image_url"),
+        }
+        match &parts[2] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                assert!(p.image_url.url.is_none());
+                assert!(p.image_url.uuid.is_some());
+            }
+            _ => panic!("parts[2] should be image_url"),
+        }
     }
 }

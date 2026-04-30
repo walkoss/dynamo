@@ -323,7 +323,12 @@ impl MediaLoader {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
-                let url = &image_part.image_url.url;
+                let url = image_part.image_url.url.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "fetch_and_decode_media_part called on uuid-only image part — \
+                         caller must skip uuid-only parts"
+                    )
+                })?;
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
                     .await?;
@@ -346,7 +351,12 @@ impl MediaLoader {
                             anyhow::anyhow!("Model does not support video inputs")
                         })?;
 
-                    let url = &video_part.video_url.url;
+                    let url = video_part.video_url.url.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "fetch_and_decode_media_part called on uuid-only video part — \
+                             caller must skip uuid-only parts"
+                        )
+                    })?;
                     self.media_fetcher
                         .check_if_url_allowed_with_dns(url)
                         .await?;

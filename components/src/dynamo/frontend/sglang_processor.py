@@ -235,7 +235,8 @@ def _build_dynamo_preproc(
     }
 
     # Forward multimodal URLs so the backend handler can load the media.
-    mm_data = extract_mm_urls(request.get("messages", []))
+    # uuids are vLLM-only for now — drop them on the SGLang path.
+    mm_data, _ = extract_mm_urls(request.get("messages", []))
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
