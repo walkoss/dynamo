@@ -204,6 +204,12 @@ pub struct ChatCompletionRequestMessageContentPartImage {
 /// preprocessor. uuid-only parts are looked up by cache key in the backend's
 /// MM processor cache (a vLLM extension to the OpenAI-compat chat schema —
 /// see vLLM's `multi_modal_uuids` plumbing).
+///
+/// `uuid` is parsed as a strict UUID (8-4-4-4-12 hex with hyphens) at the wire
+/// boundary; clients that hash arbitrary cache keys MUST format them as a
+/// proper UUID (e.g. `uuid5(NAMESPACE_OID, ref)`). Internally the preprocessor
+/// downgrades to a plain string before forwarding to vLLM, whose
+/// `multi_modal_uuids` is contract-free on format.
 #[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "ImageUrlArgs")]
 #[builder(pattern = "mutable")]
@@ -215,7 +221,7 @@ pub struct ImageUrl {
     pub url: Option<Url>,
     pub detail: Option<ImageDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    pub uuid: Option<Uuid>,
 }
 
 #[derive(Clone, Serialize, Default, Debug, Deserialize, PartialEq)]
@@ -415,7 +421,7 @@ pub struct VideoUrl {
     pub url: Option<Url>,
     pub detail: Option<ImageDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    pub uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
@@ -438,7 +444,7 @@ pub struct AudioUrl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<Url>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    pub uuid: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
@@ -999,23 +1005,26 @@ mod tests {
         let img = ImageUrl {
             url: None,
             detail: None,
-            uuid: Some("img-aabbccddeeff0011".to_string()),
+            uuid: Some(Uuid::nil()),
         };
         let json = serde_json::to_value(&img).unwrap();
         assert!(json.get("url").is_none(), "url field must be omitted when None");
-        assert_eq!(json["uuid"], "img-aabbccddeeff0011");
+        assert_eq!(json["uuid"], "00000000-0000-0000-0000-000000000000");
     }
 
     #[test]
-    fn image_url_uuid_accepts_opaque_cache_key() {
-        // vLLM's cached-MM extension uses an opaque string cache key. Make
-        // sure we accept the `img-<hex>` shape that aiperf emits, NOT a
-        // strict hyphenated UUID.
-        let img = parse_image_url(serde_json::json!({
+    fn image_url_uuid_rejects_non_uuid_string() {
+        // The wire boundary is strict: hashed cache keys must be formatted
+        // as a proper hyphenated UUID before the request hits the server.
+        // `img-<hex>` and other free-form strings get rejected here.
+        let result = serde_json::from_value::<ImageUrl>(serde_json::json!({
             "url": "https://x.example/y.png",
             "uuid": "img-ac3921de680bb217"
         }));
-        assert_eq!(img.uuid.as_deref(), Some("img-ac3921de680bb217"));
+        assert!(
+            result.is_err(),
+            "non-UUID `uuid` strings must be rejected at the wire boundary"
+        );
     }
 
     #[test]

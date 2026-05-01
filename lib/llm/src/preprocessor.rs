@@ -443,21 +443,25 @@ impl OpenAIPreprocessor {
                 _ => continue,
             };
             for content_part in content_parts.iter() {
+                // The chat structs hold a strict `Uuid` at the wire boundary.
+                // Downgrade to `String` here — vLLM's `multi_modal_uuids` is
+                // format-free and the rest of our internal pipeline already
+                // takes strings.
                 let (type_str, url, uuid) = match content_part {
                     ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => (
                         "image_url",
                         p.image_url.url.clone(),
-                        p.image_url.uuid.clone(),
+                        p.image_url.uuid.map(|u| u.to_string()),
                     ),
                     ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => (
                         "video_url",
                         p.video_url.url.clone(),
-                        p.video_url.uuid.clone(),
+                        p.video_url.uuid.map(|u| u.to_string()),
                     ),
                     ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => (
                         "audio_url",
                         p.audio_url.url.clone(),
-                        p.audio_url.uuid.clone(),
+                        p.audio_url.uuid.map(|u| u.to_string()),
                     ),
                     _ => continue,
                 };

@@ -45,8 +45,8 @@ buf = BytesIO()
 img.save(buf, format="PNG")
 print(base64.b64encode(buf.getvalue()).decode(), end="")
 ')"
-IMG_A_UUID="img-aabbccddeeff0011"
-IMG_B_UUID="img-ffffffffffffffff"
+IMG_A_UUID="aabbccdd-eeff-0011-2233-445566778899"
+IMG_B_UUID="ffffffff-ffff-ffff-ffff-ffffffffffff"
 
 cleanup() {
     pkill -f "dynamo.frontend" 2>/dev/null || true
@@ -174,6 +174,22 @@ REQ4=$(jq -n --arg model "$MODEL" --arg url "$IMG_A_URL" --arg uuid "$IMG_A_UUID
 }')
 post_req "$REQ4" "04_five_imgs_one_fresh_four_repeats"
 
+# Req 5 — wire-boundary negative case: a non-UUID `uuid` string
+# (e.g. aiperf's old `img-<hex>` shape) MUST be rejected at the chat
+# parser with HTTP 400. This proves the strict-public contract.
+REQ5=$(jq -n --arg model "$MODEL" '{
+    model: $model,
+    max_tokens: 4,
+    messages: [{
+        role: "user",
+        content: [
+            {type: "text", text: "Should be rejected at the wire."},
+            {type: "image_url", image_url: {uuid: "img-not-a-uuid"}}
+        ]
+    }]
+}')
+post_req "$REQ5" "05_negative_non_uuid_string" || true
+
 echo
 echo "=== ASSERTIONS ==="
 PASS=0
@@ -205,6 +221,15 @@ for label in 01_url_plus_uuid_fill 02_uuid_only_hit 03_uuid_only_miss 04_five_im
         FAIL=$((FAIL + 1))
     fi
 done
+
+# Negative case is inverted: PASS only when the parser rejects it.
+if not_a_parse_error "$LOG_DIR/05_negative_non_uuid_string.json"; then
+    echo "  FAIL  05_negative_non_uuid_string  (non-UUID uuid was NOT rejected)"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS  05_negative_non_uuid_string  (non-UUID rejected at wire boundary)"
+    PASS=$((PASS + 1))
+fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL  (logs in $LOG_DIR)"
