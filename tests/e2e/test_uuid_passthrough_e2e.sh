@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# End-to-end test for the OpenAI cached-MM uuid extension on dynamo.frontend +
-# dynamo.vllm. Boots a small Qwen3-VL-2B-Instruct worker (with vLLM's
-# mm_processor_cache_gb > 0) plus a frontend, sends four request shapes:
+# End-to-end test for the cached-MM uuid passthrough on dynamo.frontend +
+# dynamo.vllm. The `uuid` field on `image_url` is a vLLM extension to the
+# OpenAI-compat chat schema (see vLLM's `multi_modal_uuids`). Boots a small
+# Qwen3-VL-2B-Instruct worker (with `mm_processor_cache_gb > 0`) plus a
+# frontend, sends four request shapes:
 #
 #   1. {url, uuid: A}                     → success (cache fill)
 #   2. {uuid: A}                          → success (cache hit, same uuid)

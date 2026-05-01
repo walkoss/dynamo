@@ -116,9 +116,9 @@ pub enum MultimodalData {
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
     /// UUID-only multimodal slot — no payload, the backend looks the cache key
-    /// up in its mm_processor_cache (vLLM's OpenAI cached-MM extension). Cache
-    /// hit → success; cache miss → backend returns an error response. Opaque
-    /// string per the OpenAI cached-MM contract — NOT necessarily a hyphenated
+    /// up in its mm_processor_cache (vLLM extension to the OpenAI-compat chat
+    /// schema; see vLLM's `multi_modal_uuids`). Cache hit → success; cache
+    /// miss → backend's call. Opaque string — NOT necessarily a hyphenated
     /// UUID; aiperf emits `img-<sha256[:16]>` for example.
     UuidOnly(String),
 }
@@ -153,9 +153,9 @@ pub struct PreprocessedRequest {
     pub multi_modal_data: Option<MultimodalDataMap>,
 
     /// Per-modality UUIDs aligned with [`Self::multi_modal_data`] entries. Set
-    /// when the request carries OpenAI cached-MM `uuid` fields per image part.
-    /// The worker forwards these to the backend via `extra_args["mm_hashes"]`,
-    /// which becomes vLLM's `multi_modal_uuids`.
+    /// when the request carries `uuid` fields per image part (vLLM extension
+    /// to the OpenAI-compat chat schema). The worker forwards these via
+    /// `extra_args["mm_hashes"]`, which becomes vLLM's `multi_modal_uuids`.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_uuids: Option<MultimodalUuidMap>,

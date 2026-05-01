@@ -45,7 +45,10 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 def extract_mm_urls(
     messages: list[dict[str, Any]],
 ) -> tuple[dict[str, list[dict[str, Any]]] | None, dict[str, list[str | None]] | None,]:
-    """Extract multimodal URLs (and OpenAI cached-MM `uuid`s) from chat messages.
+    """Extract multimodal URLs (and per-part `uuid`s) from chat messages.
+
+    `uuid` is a vLLM extension to the OpenAI-compat chat schema (an opaque
+    cache key for vLLM's `multi_modal_uuids` / `mm_processor_cache`).
 
     Walks user-message content arrays and collects ``image_url``, ``audio_url``,
     and ``video_url`` entries. Each part is one of:

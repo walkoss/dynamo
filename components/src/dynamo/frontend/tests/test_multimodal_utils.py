@@ -171,7 +171,7 @@ def test_handles_malformed_content_non_dict():
     assert mm_uuids is None
 
 
-# -- OpenAI cached-MM uuid extension --
+# -- vLLM cached-MM uuid extension to the OpenAI-compat chat schema --
 
 
 def test_url_with_uuid_emits_uuid_in_parallel_map():

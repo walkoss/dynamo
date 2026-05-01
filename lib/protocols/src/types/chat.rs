@@ -201,8 +201,9 @@ pub struct ChatCompletionRequestMessageContentPartImage {
 /// Differs from upstream: uses `url::Url` instead of `String`, adds `uuid` field
 /// for tracking multimodal assets through the pipeline. `url` and `uuid` are
 /// both individually optional — at least one must be present, validated at the
-/// preprocessor (uuid-only parts are looked up in the backend's MM processor
-/// cache; the OpenAI cached-MM extension).
+/// preprocessor. uuid-only parts are looked up by cache key in the backend's
+/// MM processor cache (a vLLM extension to the OpenAI-compat chat schema —
+/// see vLLM's `multi_modal_uuids` plumbing).
 #[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "ImageUrlArgs")]
 #[builder(pattern = "mutable")]
@@ -948,7 +949,7 @@ mod tests {
         assert_eq!(delta.arguments.as_deref(), Some("{\"location\":\"SF\"}"));
     }
 
-    // -- ImageUrl optional-url + uuid (cached-MM extension) tests --
+    // -- ImageUrl optional-url + uuid (vLLM cached-MM extension) tests --
 
     fn parse_image_url(json: serde_json::Value) -> ImageUrl {
         serde_json::from_value(json).expect("ImageUrl deserialization failed")
@@ -1007,9 +1008,9 @@ mod tests {
 
     #[test]
     fn image_url_uuid_accepts_opaque_cache_key() {
-        // The OpenAI cached-MM extension uses an opaque string. Make sure
-        // we accept the `img-<hex>` shape that aiperf emits, NOT a standard
-        // hyphenated UUID.
+        // vLLM's cached-MM extension uses an opaque string cache key. Make
+        // sure we accept the `img-<hex>` shape that aiperf emits, NOT a
+        // strict hyphenated UUID.
         let img = parse_image_url(serde_json::json!({
             "url": "https://x.example/y.png",
             "uuid": "img-ac3921de680bb217"
