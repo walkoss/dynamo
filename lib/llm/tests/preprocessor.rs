@@ -260,6 +260,7 @@ impl Request {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -550,10 +551,10 @@ pub mod openai_preprocessor_tests {
             NvExt::builder()
                 .agent_context(
                     AgentContext::builder()
-                        .workflow_type_id("deep_research:v1".to_string())
-                        .workflow_id("run-123".to_string())
-                        .program_id("run-123:researcher-0".to_string())
-                        .parent_program_id("run-123:orchestrator".to_string())
+                        .session_type_id("deep_research:v1".to_string())
+                        .session_id("run-123".to_string())
+                        .trajectory_id("run-123:researcher-0".to_string())
+                        .parent_trajectory_id("run-123:orchestrator".to_string())
                         .build()
                         .unwrap(),
                 )
@@ -570,11 +571,11 @@ pub mod openai_preprocessor_tests {
         let agent_context = preprocessed_request
             .agent_context
             .expect("agent_context should propagate");
-        assert_eq!(agent_context.workflow_type_id, "deep_research:v1");
-        assert_eq!(agent_context.workflow_id, "run-123");
-        assert_eq!(agent_context.program_id, "run-123:researcher-0");
+        assert_eq!(agent_context.session_type_id, "deep_research:v1");
+        assert_eq!(agent_context.session_id, "run-123");
+        assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
         assert_eq!(
-            agent_context.parent_program_id.as_deref(),
+            agent_context.parent_trajectory_id.as_deref(),
             Some("run-123:orchestrator")
         );
     }
@@ -614,10 +615,7 @@ fn build_message(text: &str, chunks: &[(&str, usize)]) -> String {
 // Helper for cached-MM test: each part is either {url, uuid}, {url}, or {uuid}.
 // `Some(url)` & `Some(uuid)` -> both fields, `Some(url)` only -> url only,
 // `None` & `Some(uuid)` -> uuid-only.
-fn build_message_with_uuids(
-    text: &str,
-    image_parts: &[(Option<&str>, Option<&str>)],
-) -> String {
+fn build_message_with_uuids(text: &str, image_parts: &[(Option<&str>, Option<&str>)]) -> String {
     let mut content_parts = vec![format!(r#"{{"type": "text", "text": "{}"}}"#, text)];
     for (url, uuid) in image_parts {
         let mut fields: Vec<String> = Vec::new();
@@ -801,16 +799,13 @@ async fn test_media_url_uuid_passthrough(
     #[case] expected_mm_hashes: Option<Vec<Option<&str>>>,
 ) {
     use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_llm::protocols::common::preprocessor::{
-        MultimodalData, PreprocessedRequestBuilder,
-    };
+    use dynamo_llm::protocols::common::preprocessor::{MultimodalData, PreprocessedRequestBuilder};
 
     // Use the local mock-llama MDC. It's text-only on the model side, but the
     // preprocessor's `gather_multi_modal_data` only walks the request's message
     // content array — model multimodality isn't a precondition. This keeps the
     // unit test offline (no HF download, no gated model).
-    const MOCK_MDC_PATH: &str =
-        "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    const MOCK_MDC_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
     let mdc = ModelDeploymentCard::load_from_disk(MOCK_MDC_PATH, None)
         .expect("mock-llama sample MDC must be present on disk");
 
@@ -843,11 +838,7 @@ async fn test_media_url_uuid_passthrough(
         let images = media_map
             .get("image_url")
             .expect("image_url modality must be present");
-        assert_eq!(
-            images.len(),
-            image_parts.len(),
-            "image part count mismatch"
-        );
+        assert_eq!(images.len(), image_parts.len(), "image part count mismatch");
 
         // Per-slot variant assertion: url-bearing parts → Url, uuid-only → UuidOnly.
         for (i, (url, _)) in image_parts.iter().enumerate() {
@@ -923,8 +914,7 @@ async fn test_image_url_without_url_or_uuid_errors() {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::protocols::common::preprocessor::PreprocessedRequestBuilder;
 
-    const MOCK_MDC_PATH: &str =
-        "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    const MOCK_MDC_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
     let mdc = ModelDeploymentCard::load_from_disk(MOCK_MDC_PATH, None)
         .expect("mock-llama sample MDC must be present on disk");
     let preprocessor = dynamo_llm::preprocessor::OpenAIPreprocessor::new(mdc.clone()).unwrap();
@@ -971,6 +961,7 @@ mod context_length_validation {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
