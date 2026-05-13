@@ -1,203 +1,198 @@
 ---
-title: Cross-Cluster Disaggregated Serving
-description: Run prefill and decode workers on separate compute clusters ("Prefill as a Service")
+title: Cross-Cluster Disaggregated Serving (Prefill as a Service)
+description: Run prefill workers on a dedicated cluster and decode workers on a separate cluster
 ---
 
-# Cross-Cluster Disaggregated Serving
+# Cross-Cluster Disaggregated Serving (Prefill as a Service)
 
-Dynamo's disaggregated serving can span two independent SLURM clusters, placing prefill workers on a dedicated high-compute cluster and decode workers on a separate cluster. This pattern is sometimes called "Prefill as a Service" (PrfaaS).
+## What is Prefill as a Service?
 
-## When to Use This
+In Dynamo's disaggregated serving, every request passes through two stages:
 
-Cross-cluster disagg is most effective when:
+1. **Prefill worker** — reads the prompt, runs the "understanding" computation, produces a KV cache
+2. **Decode worker** — receives the KV cache and generates output tokens one by one
 
-- **Hardware specialization**: your prefill cluster has higher memory bandwidth (e.g., H100 HBM3) or more compute-dense GPUs than your decode cluster
-- **Independent scaling**: prefill and decode queues have different traffic patterns and you want to scale them independently
-- **Multi-tenant prefill**: a single prefill fleet serves multiple decode clusters
+Normally both run on the same cluster. **Prefill as a Service (PrfaaS)** takes this further: the prefill workers live on a *dedicated, separate cluster*, and serve their computed KV caches to one or more decode clusters over the network.
 
-### Bandwidth Considerations
+```
+Prefill cluster                      Decode cluster(s)
+┌──────────────────────────────┐     ┌──────────────────────────────────┐
+│  Prefill workers             │────►│  Frontend :8000                   │
+│  (compute-dense GPUs)        │ KV  │  Decode workers (many)            │
+│  Single shared fleet         │     │  (memory-bandwidth GPUs)          │
+└──────────────────────────────┘     └──────────────────────────────────┘
+          │ shared etcd + NATS │
+          └────────────────────┘
+```
 
-The viability of cross-cluster KV transfer depends on model architecture and context length:
+### Why run prefill and decode on separate clusters?
 
-| Model type | KV size at 32K ISL | Cross-DC Ethernet viable? |
+**Hardware specialization**: Prefill is compute-bound (matrix multiplications over the full prompt). Decode is memory-bandwidth-bound (reading weights once per token). These have different optimal GPU profiles. A compute-dense GPU (H100 HBM3, A100) excels at prefill; a high-memory GPU (H100 NVL, A100 80GB) is more efficient for decode. Cross-cluster serving lets you match hardware to the workload.
+
+**Independent scaling**: Prefill and decode have different saturation points. At high request rate, prefill saturates first. With PrfaaS you add prefill capacity without changing the decode pool.
+
+**Multi-tenant prefill**: A single prefill fleet can serve multiple decode clusters — different teams, different datacenters — sharing the compute cost of long-context prefill.
+
+## The bandwidth constraint
+
+The catch: the KV cache must travel over the network between clusters. Whether this is feasible depends on model architecture and context length.
+
+### KV cache sizes for DeepSeek-R1-Distill-Llama-8B
+
+Architecture: 32 layers, 8 GQA KV heads, head_dim=128, bfloat16.
+
+KV size per token = 32 layers × 2 (K+V) × 8 heads × 128 dim × 2 bytes = **131,072 bytes (128 KB)**
+
+| ISL | KV cache size | Transfer @ 10 Gbps | Transfer @ 25 Gbps | Transfer @ 100 Gbps |
+|-----|---------------|--------------------|--------------------|--------------------|
+| 4K tokens | **512 MB** | 0.41s | 0.16s | 0.04s |
+| 8K tokens | **1.0 GB** | 0.82s | 0.33s | 0.08s |
+| 16K tokens | **2.0 GB** | 1.64s | 0.66s | 0.16s |
+| 32K tokens | **4.1 GB** | 3.28s | 1.31s | 0.33s |
+
+Plus ~70ms overhead (2 × 34ms RTT) for TCP handshake/ACK on a typical inter-DC link.
+
+**Use these to validate measured results**: measured TTFT delta (cross-DC − same-DC) should be within ~10–20% of the table values at your measured bandwidth. Large deviations indicate UCX transport misconfiguration or unexpected bottlenecks.
+
+### Model architecture matters
+
+| Model type | KV reduction | Cross-DC Ethernet viable? |
 |---|---|---|
-| Dense attention (e.g. Llama-3-8B) | ~2.3 GB | Requires high-speed inter-cluster fabric |
-| GQA 8-head (e.g. Qwen3-8B) | ~1.1 GB | Marginal at 10 Gbps for ISL > 16K |
-| Hybrid attention (e.g. linear-attention variants, 3:1–7:1 ratio) | ~30–100 MB | Viable over standard 100 Gbps Ethernet |
+| Dense attention (Llama-3, DeepSeek-R1-Distill) | 1× | Needs fast fabric at ISL > 8K |
+| GQA (8 KV heads, e.g. Qwen3-8B) | ~4× | Marginal at 10 Gbps for ISL > 16K |
+| Hybrid attention (Kimi Linear, 3:1–7:1 linear:full) | ~36× | Viable over standard Ethernet |
 
-At short ISL (< 4K tokens) or with small models, KV transfer overhead is negligible regardless of network speed.
+The PrfaaS-PD paper (Qin et al., Moonshot AI + Tsinghua, [arXiv:2604.15039](https://arxiv.org/abs/2604.15039)) first quantified this: hybrid-attention models like Kimi Linear-1T at 128K ISL require only 4.88 Gbps, making cross-DC deployment on commodity 100 Gbps Ethernet practical.
 
-## Architecture
+## Two experiments
 
-```
-Prefill cluster (e.g. computelab)       Decode cluster (e.g. dlcluster)
-┌──────────────────────────────────┐    ┌──────────────────────────────────┐
-│  Prefill worker(s)               │    │  Frontend  :8000                  │
-│  - registers in shared etcd      │    │  Decode worker(s)                 │
-│  - listens on NIXL side channel  │◄───│  - route via shared etcd         │
-│  - VLLM_NIXL_SIDE_CHANNEL_HOST   │    │  - pull KV over NIXL TCP         │
-│    = this node's routable IP     │    │  - CUDA_VISIBLE_DEVICES=0,1,...  │
-└──────────────────────────────────┘    └──────────────────────────────────┘
-         │                                         │
-         └──────────── Shared etcd ───────────────┘
-                       Shared NATS
-```
+This guide covers two distinct use cases:
 
-**Connection directions**: All TCP connections are initiated by the decode cluster toward the prefill cluster. Prefill workers are pure listeners. This means one-way firewall rules (decode → prefill) are sufficient.
+### Experiment A: Hardware specialization (heterogeneous)
+
+**Prefill cluster: computelab A10 (24 GB VRAM)**
+**Decode cluster: dlcluster H100 NVL (94 GB VRAM)**
+**Inter-cluster RTT: 34ms**
+
+Demonstrates that PrfaaS works with mismatched GPU types. The A10 prefill worker sends KV to the H100 decode worker across a genuine inter-datacenter link. Results show functional correctness and provide a baseline for ISL ≤ 8K where A10 VRAM is sufficient.
+
+### Experiment B: Network overhead isolation (homogeneous hardware)
+
+**Same-DC baseline**: prefill and decode on the same node (in-node PCIe NIXL transfer)
+**Cross-DC test**: prefill on computelab H100 HBM3, decode on dlcluster H100 NVL, 34ms RTT
+
+Isolates the pure network cost by measuring TTFT delta = cross-DC TTFT − same-DC TTFT. Compare against the theoretical table above to validate your inter-cluster bandwidth.
 
 ## Prerequisites
 
-### Shared Infrastructure
+### Shared etcd and NATS
 
-You need etcd and NATS reachable from both clusters. A CPU-only allocation on either cluster works:
+Both clusters need access to a shared etcd and NATS server:
 
 ```bash
-# Start etcd (on a neutral host with IP 10.0.1.5)
-docker run -d --net=host quay.io/coreos/etcd:v3.5.12 etcd \
-  --listen-client-urls http://0.0.0.0:2379 \
-  --advertise-client-urls http://10.0.1.5:2379 \
-  --listen-peer-urls http://0.0.0.0:2380 \
-  --initial-cluster default=http://10.0.1.5:2380
+# Run on a neutral host (e.g. a CPU-only allocation), get its IP
+INFRA_IP=$(hostname -I | awk '{print $1}')
 
-# Start NATS with JetStream (same host)
-docker run -d --net=host nats:latest -js
+docker run -d --name etcd --net=host quay.io/coreos/etcd:v3.5.12 etcd \
+  --listen-client-urls=http://0.0.0.0:2379 \
+  --advertise-client-urls=http://${INFRA_IP}:2379
+
+docker run -d --name nats --net=host nats:latest -js
 ```
 
-### Network Connectivity
+### Network connectivity
 
-Verify the decode cluster can reach the prefill cluster:
+All TCP connections are initiated by the decode cluster **toward** the prefill cluster — prefill workers only listen. One-way firewall rules (decode → prefill) are sufficient.
 
+Verify before starting:
 ```bash
-# From a decode node, confirm reachability to prefill node IP
-nc -zv <prefill_node_ip> 22     # Should succeed
-nc -zv <prefill_node_ip> 20097  # NIXL port (will succeed after prefill starts)
-```
+# From a decode node, ping the prefill node
+ping -c 3 <prefill_node_ip>
 
-Find the prefill node's routable IP:
-
-```bash
-# On the prefill node
-hostname -I | awk '{print $1}'
+# Check actual bandwidth (needed to validate results against the table)
+iperf3 -c <prefill_node_ip> -t 10 -P 4
 ```
 
 ## Quick Start
 
-### Step 1: Start prefill workers (on prefill cluster)
+### Step 1: Start prefill (on prefill cluster)
 
 ```bash
-export ETCD_ENDPOINTS=http://10.0.1.5:2379
-export NATS_SERVER=nats://10.0.1.5:4222
+export ETCD_ENDPOINTS=http://<infra_ip>:2379
+export NATS_SERVER=nats://<infra_ip>:4222
 export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname -I | awk '{print $1}')
-export MODEL=Qwen/Qwen3-0.6B
+export MODEL=deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 ./examples/backends/vllm/launch/disagg_multi_cluster_prefill.sh
 ```
 
-### Step 2: Start decode workers + frontend (on decode cluster)
+### Step 2: Start decode + frontend (on decode cluster)
 
 ```bash
-export ETCD_ENDPOINTS=http://10.0.1.5:2379
-export NATS_SERVER=nats://10.0.1.5:4222
-export MODEL=Qwen/Qwen3-0.6B
-export DECODE_GPUS=0,1  # use both GPUs on this node as decode workers
+export ETCD_ENDPOINTS=http://<infra_ip>:2379
+export NATS_SERVER=nats://<infra_ip>:4222
+export MODEL=deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+export DECODE_GPUS=0,1  # multiple decode workers
 
 ./examples/backends/vllm/launch/disagg_multi_cluster_decode.sh
 ```
 
-### Step 3: Send requests
+### Step 3: Test
 
 ```bash
 curl http://<decode_node_ip>:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 50
-  }'
+  -d '{"model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+       "messages":[{"role":"user","content":"Explain quantum entanglement."}],
+       "max_tokens":100}'
 ```
 
-## Multi-Prefill Deployment
+## Critical: UCX transport configuration
 
-Scale to N prefill + M decode workers by running the prefill script on N nodes and setting `DECODE_GPUS=0,1,...,M-1` on the decode node:
+**`UCX_TLS=tcp` is required for cross-cluster NIXL KV transfer.** By default, UCX attempts RDMA (InfiniBand/RoCE), which fails across WAN boundaries and causes `EngineDeadError` on the first request. The launch scripts set this automatically, but verify when deploying manually:
 
+```bash
+export UCX_TLS=tcp
+export UCX_SOCKADDR_TLS_PRIORITY=tcp
+export NIXL_UCX_TLS=tcp
 ```
-PREFILL_NODE_1 ─────┐
-PREFILL_NODE_2 ─────┤──── etcd/NATS ────┬── DECODE_NODE (GPU 0, decode)
-PREFILL_NODE_N ─────┘                   └── DECODE_NODE (GPU 1, decode)
-                                             DECODE_NODE (frontend :8000)
+
+Set on **both** prefill and decode workers.
+
+## Container deployment on NIS/LDAP clusters
+
+On clusters where the user is managed by NIS or LDAP (not in local `/etc/passwd`):
+
+```bash
+# Create a minimal passwd with your user entry
+cat /etc/passwd > /tmp/container-passwd
+echo "$(whoami):x:$(id -u):$(id -g):$(whoami):/tmp:/bin/bash" >> /tmp/container-passwd
+# Pass: -v /tmp/container-passwd:/etc/passwd:ro
 ```
 
-The Dynamo PrefillRouter load-balances across all registered prefill workers automatically.
+If `nsswitch.conf` includes NIS but the NIS client library is absent in the container:
+```bash
+printf 'passwd: files\ngroup: files\n' > /tmp/nsswitch.conf
+# Pass: -v /tmp/nsswitch.conf:/etc/nsswitch.conf:ro
+```
+
+For pre-cached models, set `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` to skip download attempts.
 
 ## Configuration Reference
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ETCD_ENDPOINTS` | Yes | — | Shared etcd URL (e.g. `http://10.0.1.5:2379`) |
-| `NATS_SERVER` | Yes | — | Shared NATS URL (e.g. `nats://10.0.1.5:4222`) |
+| `ETCD_ENDPOINTS` | Yes | — | Shared etcd URL |
+| `NATS_SERVER` | Yes | — | Shared NATS URL |
 | `VLLM_NIXL_SIDE_CHANNEL_HOST` | Yes (prefill) | — | Prefill node IP reachable from decode cluster |
 | `VLLM_NIXL_SIDE_CHANNEL_PORT` | No | `20097` | NIXL side channel port |
+| `UCX_TLS` | Yes (cross-DC) | `tcp` | Force TCP transport for cross-cluster NIXL |
+| `HF_HUB_OFFLINE` | Recommended | — | Use cached model without API calls |
 | `MODEL` | No | `Qwen/Qwen3-0.6B` | HuggingFace model ID |
 | `DECODE_GPUS` | No | `0` | Comma-separated GPU indices for decode workers |
-| `DYN_HTTP_PORT` | No | `8000` | Frontend HTTP port |
-
-## Containerized deployment on NIS/LDAP clusters
-
-On clusters where the user is managed by NIS or LDAP (not in the local `/etc/passwd`), the container's `getpwuid()` call fails when running with `--user`. Create a minimal passwd override:
-
-```bash
-# On each cluster node before launching containers
-cat /etc/passwd > /tmp/container-passwd
-echo "$(whoami):x:$(id -u):$(id -g):$(whoami):/tmp:/bin/bash" >> /tmp/container-passwd
-```
-
-Then pass to docker: `-v /tmp/container-passwd:/etc/passwd:ro`
-
-If the cluster uses NIS in `/etc/nsswitch.conf` but the NIS client library is absent in the container:
-
-```bash
-printf 'passwd: files\ngroup: files\n' > /tmp/nsswitch.conf
-```
-
-Pass to docker: `-v /tmp/nsswitch.conf:/etc/nsswitch.conf:ro`
-
-Alternatively, omit `--user` entirely when the model cache is on local NVMe storage (not NFS), since there are no root-squash write restrictions.
-
-## Benchmarking with AIPerf
-
-To measure cross-cluster TTFT overhead:
-
-```bash
-# On decode node
-aiperf run \
-  --target http://<decode_node>:8000 \
-  --model Qwen/Qwen3-8B \
-  --isl 16384 \
-  --osl 128 \
-  --num-requests 50
-```
-
-Compare against the same-cluster baseline from `disagg.sh` to quantify the NIXL TCP transfer overhead at your target ISL.
-
-### Expected KV transfer overhead by ISL (Qwen3-8B, GQA-8 heads)
-
-| ISL | KV size | Transfer @ 10 Gbps | Transfer @ 1 Gbps |
-|---|---|---|---|
-| 2K tokens | ~150 MB | ~0.12s | ~1.2s |
-| 8K tokens | ~600 MB | ~0.48s | ~4.8s |
-| 16K tokens | ~1.1 GB | ~0.88s | ~8.8s |
-| 32K tokens | ~2.3 GB | ~1.8s | ~18s |
-
-Measured same-DC baseline (TTFT, Qwen3-8B, enforce-eager, H100):
-
-| ISL | TTFT |
-|---|---|
-| ~2K | 1.4s (warm) |
-| ~8K | 5.6s |
-| ~16K | 11.6s |
 
 ## See Also
 
 - [Disaggregated Serving design doc](../../../docs/design-docs/disagg-serving.md)
 - [Single-cluster disagg example](disagg.sh)
-- [PrfaaS-PD paper](https://arxiv.org/abs/2604.15039) — Qin et al. (Moonshot AI + Tsinghua, 2026) — original analysis of cross-DC prefill with hybrid-attention models
+- [PrfaaS-PD paper](https://arxiv.org/abs/2604.15039) — Qin et al. (Moonshot AI + Tsinghua, 2026)
