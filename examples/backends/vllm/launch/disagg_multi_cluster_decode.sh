@@ -42,6 +42,11 @@ fi
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
+# Force UCX TCP transport — required for cross-cluster KV transfer.
+export UCX_TLS="${UCX_TLS:-tcp}"
+export UCX_SOCKADDR_TLS_PRIORITY="${UCX_SOCKADDR_TLS_PRIORITY:-tcp}"
+export NIXL_UCX_TLS="${NIXL_UCX_TLS:-tcp}"
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Cross-Cluster Disaggregated Serving (decode node)" "$MODEL" "$HTTP_PORT"
 

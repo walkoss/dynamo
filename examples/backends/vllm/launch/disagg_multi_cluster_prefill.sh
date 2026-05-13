@@ -48,6 +48,12 @@ print_launch_banner "Launching Cross-Cluster Disaggregated Serving (prefill node
 
 VLLM_NIXL_SIDE_CHANNEL_PORT="${VLLM_NIXL_SIDE_CHANNEL_PORT:-20097}"
 
+# Force UCX TCP transport — required for cross-cluster KV transfer.
+# Without this, UCX attempts RDMA which fails across WAN, causing EngineDeadError.
+export UCX_TLS="${UCX_TLS:-tcp}"
+export UCX_SOCKADDR_TLS_PRIORITY="${UCX_SOCKADDR_TLS_PRIORITY:-tcp}"
+export NIXL_UCX_TLS="${NIXL_UCX_TLS:-tcp}"
+
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8082}" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_NIXL_SIDE_CHANNEL_PORT" \
 VLLM_NIXL_SIDE_CHANNEL_HOST="$VLLM_NIXL_SIDE_CHANNEL_HOST" \
