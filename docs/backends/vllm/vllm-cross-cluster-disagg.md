@@ -93,6 +93,8 @@ Cross-cluster is faster than same-DC here because the same-DC baseline used in-n
 
 Isolates the pure network cost by measuring TTFT delta = cross-DC TTFT − same-DC TTFT. Compare against the theoretical table above to validate your inter-cluster bandwidth.
 
+This experiment requires two clusters connected by a genuine inter-DC link (~34ms RTT). Use the KV size table in the previous section to predict expected transfer times and validate your results.
+
 ## Prerequisites
 
 ### Shared etcd and NATS
