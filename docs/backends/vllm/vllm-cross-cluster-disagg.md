@@ -72,9 +72,19 @@ This guide covers two distinct use cases:
 
 **Prefill cluster: A10 (24 GB VRAM, compute-dense)**
 **Decode cluster: H100 NVL (94 GB VRAM, memory-bandwidth)**
-**Inter-cluster RTT: ~34ms (cross-datacenter Ethernet)**
+**Inter-cluster RTT: ~2ms (same-campus fabric)**
 
-Demonstrates that PrfaaS works with mismatched GPU types. The A10 prefill worker sends KV to the H100 decode worker across a genuine inter-datacenter link. Results show functional correctness and provide a baseline for ISL ≤ 8K where A10 VRAM is sufficient.
+Demonstrates that PrfaaS works with mismatched GPU types. The A10 prefill worker sends KV to the H100 decode worker across a genuine inter-cluster link. Model: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`.
+
+**Measured results** (fresh-prompt TTFT after NIXL warmup, `max_tokens=1`):
+
+| ISL | Cross-cluster TTFT | Same-DC baseline |
+|-----|-------------------|-----------------|
+| ~4K tokens | 0.144s | 3.41s |
+| ~8K tokens | 0.161s | 5.04s |
+| ~16K tokens | 0.281s | — |
+
+Cross-cluster is faster than same-DC here because the same-DC baseline used in-node PCIe NIXL transfer on a PCIe-limited node, while the cross-cluster path uses TCP over a fast campus fabric. The A10 VRAM limit (24 GB) caps usable ISL at ~16K for this model.
 
 ### Experiment B: Network overhead isolation (homogeneous hardware)
 
