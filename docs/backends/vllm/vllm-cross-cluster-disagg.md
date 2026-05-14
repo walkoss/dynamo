@@ -99,6 +99,9 @@ Isolates the pure network cost by comparing TTFT across different network distan
 | ~4K tokens | 0.144s | **0.139s** | ~0ms | 0% |
 | ~8K tokens | 0.161s | **0.291s** | +0.130s | +81% |
 | ~16K tokens | 0.281s | **0.720s** | +0.439s | +156% |
+| ~32K tokens | ~0.56s† | **1.647s** | +1.087s | +194% |
+
+† Same-fabric 32K extrapolated as 2× 16K (not directly measured). Requires `enforce_handshake_compat: false` on both workers when using mixed GPU architectures — see Troubleshooting.
 
 The **overhead scales linearly with KV size** (8K→16K doubles the KV, overhead increases from 0.13s to 0.44s), confirming the bottleneck is network transfer, not per-request protocol overhead. The implied effective bandwidth between these clusters is ~30–40 Gbps — higher than the theoretical 10 Gbps column in the table above, which would predict +0.41s/+0.82s/+1.64s. Your results will vary with your inter-cluster link speed.
 
