@@ -93,16 +93,19 @@ Cross-cluster is faster than same-datacenter here because the same-datacenter ba
 
 Isolates the pure network cost by comparing TTFT across different network distances with the same prefill hardware (A10) and decode hardware (H100 NVL).
 
-**Measured results** (cross-datacenter, 41.5ms RTT, UCX TCP):
+**Measured results** (cross-datacenter, 41.5ms RTT, UCX TCP, warm NIXL connection):
 
-| ISL | Cross-datacenter TTFT | Same-fabric TTFT (Exp A) | Network overhead | Theoretical (10 Gbps) |
-|-----|----------------------|--------------------------|------------------|-----------------------|
-| ~4K tokens | **0.882s** | 0.144s | +0.738s | +0.49s |
-| ~8K tokens | **1.675s** | 0.161s | +1.514s | +0.90s |
+| ISL | Same-fabric TTFT (Exp A) | Cross-datacenter TTFT | Network overhead |
+|-----|--------------------------|----------------------|-----------------|
+| ~4K tokens | 0.144s | **0.139s** | ~0ms (within noise) |
+| ~8K tokens | 0.161s | **0.291s** | **+0.130s** |
+| ~16K tokens | 0.281s | **0.720s** | **+0.439s** |
 
-The measured overhead exceeds the theoretical 10 Gbps estimate by ~50%, consistent with an effective bandwidth of ~6–7 Gbps between these clusters and NIXL protocol handshake overhead. The **linear scaling** (4K→8K is 1.9×) confirms the bottleneck is prefill compute + KV transfer, not connection setup.
+The **overhead scales linearly with KV size** (8K→16K doubles the KV, overhead increases from 0.13s to 0.44s), confirming the bottleneck is network transfer, not per-request protocol overhead. The implied effective bandwidth between these clusters is ~30–40 Gbps — higher than the theoretical 10 Gbps column in the table above, which would predict +0.41s/+0.82s/+1.64s. Your results will vary with your inter-cluster link speed.
 
-This experiment requires two clusters with a genuine inter-datacenter link. Use the KV size table above to predict expected transfer times at your measured bandwidth (`iperf3 -c <prefill_ip> -t 10`) and compare against measured TTFT delta.
+Note: a cold NIXL connection (first request after worker startup) adds ~0.79s of connection establishment overhead regardless of ISL. The numbers above are measured after a warmup request. See the benchmark script for details.
+
+This experiment requires two clusters with a genuine inter-datacenter link. Use the KV size table above to predict expected transfer times at your measured bandwidth (`iperf3 -c <prefill_ip> -t 10 -P 4`) and compare against measured TTFT delta.
 
 ## Prerequisites
 
