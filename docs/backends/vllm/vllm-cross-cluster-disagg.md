@@ -94,11 +94,11 @@ Isolates the pure network cost by comparing TTFT across different network distan
 
 **Measured results** (cross-datacenter, 41.5ms RTT, UCX TCP, warm NIXL connection):
 
-| ISL | Same-fabric TTFT (Exp A) | Cross-datacenter TTFT | Network overhead |
-|-----|--------------------------|----------------------|-----------------|
-| ~4K tokens | 0.144s | **0.139s** | ~0ms (within noise) |
-| ~8K tokens | 0.161s | **0.291s** | **+0.130s** |
-| ~16K tokens | 0.281s | **0.720s** | **+0.439s** |
+| ISL | Same-fabric TTFT | Cross-datacenter TTFT | Overhead | % slower |
+|-----|------------------|-----------------------|----------|---------|
+| ~4K tokens | 0.144s | **0.139s** | ~0ms | 0% |
+| ~8K tokens | 0.161s | **0.291s** | +0.130s | +81% |
+| ~16K tokens | 0.281s | **0.720s** | +0.439s | +156% |
 
 The **overhead scales linearly with KV size** (8K→16K doubles the KV, overhead increases from 0.13s to 0.44s), confirming the bottleneck is network transfer, not per-request protocol overhead. The implied effective bandwidth between these clusters is ~30–40 Gbps — higher than the theoretical 10 Gbps column in the table above, which would predict +0.41s/+0.82s/+1.64s. Your results will vary with your inter-cluster link speed.
 
