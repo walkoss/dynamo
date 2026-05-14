@@ -235,6 +235,24 @@ printf 'passwd: files\ngroup: files\n' > /tmp/min-nsswitch.conf
 # -v /tmp/container-passwd:/etc/passwd:ro -v /tmp/min-nsswitch.conf:/etc/nsswitch.conf:ro
 ```
 
+### NIXL compatibility hash mismatch (heterogeneous hardware)
+
+When prefill and decode run on different GPU architectures (e.g. A10 on SM80 vs H100 on SM90), the attention backend can differ, causing NIXL to reject the handshake:
+
+```
+NIXL compatibility hash mismatch. Local: <hash>, Remote: <hash>.
+Prefill and decode instances have incompatible configurations.
+```
+
+Disable the check on **both** workers:
+
+```bash
+--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both",
+  "kv_connector_extra_config":{"enforce_handshake_compat":false}}'
+```
+
+This is safe when you have verified both workers use the same model, dtype, and block size. Only the attention kernel implementation differs due to hardware architecture.
+
 ### `NIXL_ERR_REMOTE_DISCONNECT` on same-node disagg
 `UCX_TLS=tcp` breaks CUDA IPC for same-node KV transfer. Only set UCX TCP overrides for cross-cluster deployments; omit them for single-node disaggregation.
 
