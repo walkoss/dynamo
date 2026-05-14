@@ -82,7 +82,6 @@ Demonstrates that PrfaaS works with mismatched GPU types. The A10 prefill worker
 |-----|-------------------|--------------------|
 | ~4K tokens | 0.144s | 3.41s |
 | ~8K tokens | 0.161s | 5.04s |
-| ~16K tokens | **0.281s** | not measured |
 
 Cross-cluster is faster than same-node here because the same-node baseline used in-node PCIe NIXL transfer on a PCIe-limited 2-GPU node, while the cross-cluster path uses TCP over a fast campus fabric. The A10 (24 GB VRAM) can serve up to 16K context for this model (weights ~16 GB + 2 GB KV = 18 GB).
 
