@@ -86,14 +86,23 @@ Demonstrates that PrfaaS works with mismatched GPU types. The A10 prefill worker
 
 Cross-cluster is faster than same-datacenter here because the same-datacenter baseline used in-node PCIe NIXL transfer on a PCIe-limited node, while the cross-cluster path uses TCP over a fast campus fabric. The A10 VRAM limit (24 GB) caps usable ISL at ~16K for this model.
 
-### Experiment B: Network overhead isolation (homogeneous hardware)
+### Experiment B: Network overhead isolation
 
-**Same-datacenter baseline**: prefill and decode on the same node (in-node PCIe NIXL transfer)
-**Cross-datacenter test**: prefill on H100 HBM3 cluster, decode on H100 NVL cluster, ~34ms RTT
+**Same-fabric baseline** (Experiment A, 2ms RTT): measured in Experiment A above
+**Cross-datacenter test**: prefill on A10 cluster, decode on H100 NVL cluster, **41.5ms RTT**
 
-Isolates the pure network cost by measuring TTFT delta = cross-datacenter TTFT − same-datacenter TTFT. Compare against the theoretical table above to validate your inter-cluster bandwidth.
+Isolates the pure network cost by comparing TTFT across different network distances with the same prefill hardware (A10) and decode hardware (H100 NVL).
 
-This experiment requires two clusters connected by a genuine inter-datacenter link (~34ms RTT). Use the KV size table in the previous section to predict expected transfer times and validate your results.
+**Measured results** (cross-datacenter, 41.5ms RTT, UCX TCP):
+
+| ISL | Cross-datacenter TTFT | Same-fabric TTFT (Exp A) | Network overhead | Theoretical (10 Gbps) |
+|-----|----------------------|--------------------------|------------------|-----------------------|
+| ~4K tokens | **0.882s** | 0.144s | +0.738s | +0.49s |
+| ~8K tokens | **1.675s** | 0.161s | +1.514s | +0.90s |
+
+The measured overhead exceeds the theoretical 10 Gbps estimate by ~50%, consistent with an effective bandwidth of ~6–7 Gbps between these clusters and NIXL protocol handshake overhead. The **linear scaling** (4K→8K is 1.9×) confirms the bottleneck is prefill compute + KV transfer, not connection setup.
+
+This experiment requires two clusters with a genuine inter-datacenter link. Use the KV size table above to predict expected transfer times at your measured bandwidth (`iperf3 -c <prefill_ip> -t 10`) and compare against measured TTFT delta.
 
 ## Prerequisites
 
@@ -200,7 +209,7 @@ For pre-cached models, set `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` to skip dow
 | `VLLM_NIXL_SIDE_CHANNEL_PORT` | No | `20097` | NIXL side channel port |
 | `UCX_TLS` | Yes (cross-datacenter) | `tcp` | Force TCP transport for cross-cluster NIXL |
 | `HF_HUB_OFFLINE` | Recommended | — | Use cached model without API calls |
-| `MODEL` | No | `Qwen/Qwen3-0.6B` | HuggingFace model ID |
+| `MODEL` | No | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` | HuggingFace model ID |
 | `DECODE_GPUS` | No | `0` | Comma-separated GPU indices for decode workers |
 
 ## Troubleshooting
@@ -234,4 +243,5 @@ Two workers loading the model from NFS simultaneously can race on config file lo
 
 - [Disaggregated Serving design doc](../../../docs/design-docs/disagg-serving.md)
 - [Single-cluster disagg example](disagg.sh)
+- [ISL benchmark script](disagg_multi_cluster_benchmark.py) — reproduce the ISL sweep from this guide
 - [PrfaaS-PD paper](https://arxiv.org/abs/2604.15039) — Qin et al. (Moonshot AI + Tsinghua, 2026)
