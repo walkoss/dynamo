@@ -37,30 +37,35 @@ Prefill cluster                      Decode cluster(s)
 
 The catch: the KV cache must travel over the network between clusters. Whether this is feasible depends on model architecture and context length.
 
-### KV cache sizes for DeepSeek-R1-Distill-Llama-8B
+### KV cache sizes and cross-cluster transfer overhead
 
-Architecture: 32 layers, 8 GQA KV heads, head_dim=128, bfloat16.
+KV size per token depends on model architecture. For a standard dense attention layer:
 
-KV size per token = 32 layers × 2 (K+V) × 8 heads × 128 dim × 2 bytes = **131,072 bytes (128 KB)**
+**KV per token** = `layers × 2 (K+V) × kv_heads × head_dim × dtype_bytes`
 
-| ISL | KV cache size | Transfer @ 10 Gbps | Transfer @ 25 Gbps | Transfer @ 100 Gbps |
-|-----|---------------|--------------------|--------------------|--------------------|
-| 4K tokens | **512 MB** | 0.41s | 0.16s | 0.04s |
-| 8K tokens | **1.0 GB** | 0.82s | 0.33s | 0.08s |
-| 16K tokens | **2.0 GB** | 1.64s | 0.66s | 0.16s |
-| 32K tokens | **4.1 GB** | 3.28s | 1.31s | 0.33s |
+For DeepSeek-R1-Distill-Llama-8B (32 layers, 8 GQA heads, dim=128, bfloat16):
+KV per token = 32 × 2 × 8 × 128 × 2 = **128 KB/token**
 
-Plus ~70ms overhead (2 × 34ms RTT) for TCP handshake/ACK on a typical inter-datacenter link.
+The following table shows KV cache sizes (FP8) and estimated TTFT overhead at **30 Gbps** — the effective bandwidth measured in the Experiment B results above. For BF16 KV cache, double the sizes and transfer times. Data sourced from [roofline.cc](https://roofline.cc).
 
-**Use these to validate measured results**: measured TTFT delta (cross-datacenter − same-datacenter) should be within ~10–20% of the table values at your measured bandwidth. Large deviations indicate UCX transport misconfiguration or unexpected bottlenecks.
+| Model | Architecture | 4K ISL | 16K ISL | 32K ISL | 64K ISL |
+|-------|-------------|--------|---------|---------|---------|
+| DeepSeek-V4-Flash | Hybrid-sparse | 30 MB (+8ms) | 76 MB (+20ms) | 137 MB (+37ms) | 259 MB (+69ms) |
+| NVIDIA Nemotron-3-Super-120B | Hybrid-linear | 57 MB (+15ms) | 105 MB (+28ms) | 169 MB (+45ms) | 297 MB (+79ms) |
+| DeepSeek-V4-Pro | Hybrid-sparse | 44 MB (+12ms) | 110 MB (+29ms) | 198 MB (+53ms) | 373 MB (+99ms) |
+| Qwen3.5-122B-A10B | Hybrid-linear | 195 MB (+52ms) | 339 MB (+90ms) | 531 MB (+142ms) | 915 MB (+244ms) |
+| GPT-OSS-120B | Hybrid-SWA | 74 MB (+20ms) | 290 MB (+77ms) | 578 MB (+154ms) | 1.1 GB (+301ms) |
+| DeepSeek-V3 / R1 | MLA | 137 MB (+37ms) | 549 MB (+146ms) | 1.07 GB (+292ms) | 2.14 GB (+584ms) |
+| Llama-3.1-8B-Instruct | Dense MHA | 256 MB (+68ms) | 1.0 GB (+273ms) | 2.0 GB (+546ms) | 4.0 GB (+1.09s) |
+| Qwen3-235B-A22B | Dense MHA | 376 MB (+100ms) | 1.47 GB (+392ms) | 2.94 GB (+784ms) | 5.88 GB (+1.57s) |
+| Llama-3.1-70B / Qwen2.5-72B | Dense MHA | 640 MB (+171ms) | 2.5 GB (+683ms) | 5.0 GB (+1.37s) | 10 GB (+2.73s) |
+| GLM-4.7 | Dense MHA | 736 MB (+196ms) | 2.88 GB (+768ms) | 5.75 GB (+1.53s) | 11.5 GB (+3.07s) |
 
-### Model architecture matters
+**Key takeaway**: Hybrid-linear and hybrid-sparse models have 5–20× smaller KV caches than dense MHA models at the same ISL, making them significantly more viable for cross-cluster PrfaaS even over slower inter-datacenter links.
 
-| Model type | KV reduction | Cross-datacenter Ethernet viable? |
-|---|---|---|
-| Dense attention (Llama-3, DeepSeek-R1-Distill) | 1× | Needs fast fabric at ISL > 8K |
-| GQA (8 KV heads, e.g. Qwen3-8B) | ~4× | Marginal at 10 Gbps for ISL > 16K |
-| Hybrid attention (Kimi Linear, 3:1–7:1 linear:full) | ~36× | Viable over standard Ethernet |
+To calibrate to your link: run `iperf3 -c <prefill_node_ip> -t 10 -P 4` to measure actual bandwidth, then multiply transfer times by `30 / your_bandwidth_gbps`.
+
+Plus ~80ms overhead (2 × RTT) per request regardless of ISL.
 
 The PrfaaS-PD paper (Qin et al., Moonshot AI + Tsinghua, [arXiv:2604.15039](https://arxiv.org/abs/2604.15039)) first quantified this: hybrid-attention models like Kimi Linear-1T at 128K ISL require only 4.88 Gbps, making cross-datacenter deployment on commodity 100 Gbps Ethernet practical.
 
