@@ -304,20 +304,26 @@ counter_prompt_tokens_cached
 
 **Upstream fix**: `max(0, pts.cached_tokens)` in `loggers.py` line ~1124, or fix the NIXL disagg connector to never emit negative token deltas. Tracked as a known vLLM v0.19.1 disagg metrics bug.
 
-### KVBM connector fails with `No UCX plugin found`
+### KVBM connector fails with `No UCX plugin found` or `No POSIX plugin found`
 
-When using the KVBM conditional disagg connector (`kvbm.v2.vllm.schedulers.connector`), if UCX is not installed on the compute node, workers fail at KV cache initialization:
+When using the KVBM conditional disagg connector (`kvbm.v2.vllm.schedulers.connector`), workers fail at KV cache initialization with:
 
 ```
 Exception: No UCX plugin found
+# or
+Exception: No POSIX plugin found
 ```
 
-**Fix**: remove `UCX` from the NIXL backends config and use only `POSIX`:
-```json
-"worker": {"nixl": {"backends": {"POSIX": {}}}, "tokio": {"worker_threads": 4}}
+**Root cause**: NIXL's plugin discovery (`nixl_agent.cpp`) looks for backend plugins (UCX, POSIX, CUDA) as shared libraries installed at the system level. These are present on dlcluster nodes at the host level but are NOT injected into Docker containers. Only Pyxis/srun-launched containers on dlcluster have access to these host-level NIXL plugins.
+
+**Fix**: use Pyxis (`srun --container-image=...`) instead of Docker on dlcluster nodes. See the `disagg-bringup/launch-kvbm-docker.sh` script for Docker-specific workarounds and notes. For production KVBM disagg on dlcluster, use Pyxis:
+
+```bash
+srun --jobid=$JOBID --overlap --container-name=my-session \
+  bash -c "source env.sh && bash .claude/skills/disagg-bringup/launch-prefill.sh"
 ```
 
-This is only relevant when using KVBM disagg (PR #9393). Standard vLLM disagg (`NixlConnector`) handles UCX differently.
+This is only relevant when using KVBM disagg (PR #9393). Standard vLLM disagg (`NixlConnector`) handles transport differently and works in Docker.
 
 ### Decode worker fails with `LlamaForCausalLM failed to be inspected`
 Two workers loading the model from NFS simultaneously can race on config file locks. Add a 10-second stagger between decode worker starts.
