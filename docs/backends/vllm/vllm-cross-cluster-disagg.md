@@ -304,6 +304,21 @@ counter_prompt_tokens_cached
 
 **Upstream fix**: `max(0, pts.cached_tokens)` in `loggers.py` line ~1124, or fix the NIXL disagg connector to never emit negative token deltas. Tracked as a known vLLM v0.19.1 disagg metrics bug.
 
+### KVBM connector fails with `No UCX plugin found`
+
+When using the KVBM conditional disagg connector (`kvbm.v2.vllm.schedulers.connector`), if UCX is not installed on the compute node, workers fail at KV cache initialization:
+
+```
+Exception: No UCX plugin found
+```
+
+**Fix**: remove `UCX` from the NIXL backends config and use only `POSIX`:
+```json
+"worker": {"nixl": {"backends": {"POSIX": {}}}, "tokio": {"worker_threads": 4}}
+```
+
+This is only relevant when using KVBM disagg (PR #9393). Standard vLLM disagg (`NixlConnector`) handles UCX differently.
+
 ### Decode worker fails with `LlamaForCausalLM failed to be inspected`
 Two workers loading the model from NFS simultaneously can race on config file locks. Add a 10-second stagger between decode worker starts.
 
