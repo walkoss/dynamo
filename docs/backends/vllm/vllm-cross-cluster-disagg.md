@@ -272,6 +272,19 @@ This is safe when you have verified both workers use the same model, dtype, and 
 ### `NIXL_ERR_REMOTE_DISCONNECT` on same-node disagg
 `UCX_TLS=tcp` breaks CUDA IPC for same-node KV transfer. Only set UCX TCP overrides for cross-cluster deployments; omit them for single-node disaggregation.
 
+### Decode worker crashes after each request with `Counters can only be incremented by non-negative amounts`
+
+The vLLM disagg metrics path reports `cached_tokens` as a negative value after KV transfer from prefill, crashing the Prometheus counter in `vllm/v1/metrics/loggers.py`:
+
+```
+ValueError: Counters can only be incremented by non-negative amounts.
+counter_prompt_tokens_cached
+```
+
+**Workaround**: restart the decode worker between ISL measurement points. The request itself completes successfully (the crash happens in post-request metrics recording). Send a warmup request after each restart to re-establish the NIXL connection before timed measurements.
+
+**Upstream fix**: `max(0, pts.cached_tokens)` in `loggers.py` line ~1124, or fix the NIXL disagg connector to never emit negative token deltas. Tracked as a known vLLM v0.19.1 disagg metrics bug.
+
 ### Decode worker fails with `LlamaForCausalLM failed to be inspected`
 Two workers loading the model from NFS simultaneously can race on config file locks. Add a 10-second stagger between decode worker starts.
 
