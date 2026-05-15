@@ -272,6 +272,25 @@ This is safe when you have verified both workers use the same model, dtype, and 
 ### `NIXL_ERR_REMOTE_DISCONNECT` on same-node disagg
 `UCX_TLS=tcp` breaks CUDA IPC for same-node KV transfer. Only set UCX TCP overrides for cross-cluster deployments; omit them for single-node disaggregation.
 
+### `Hybrid KV cache manager is disabled but failed to convert the KV cache specs to one unified type`
+
+Affects hybrid-attention models (NemotronH, Mamba-Hybrid, SWA variants). These models mix full-attention and SWA/Mamba layers with incompatible KV formats. The standard vLLM KV cache manager requires a single unified type across all layers and fails at startup.
+
+**Workaround**: use the KVBM-based disagg path (PR [#9393](https://github.com/ai-dynamo/dynamo/pull/9393)), which handles per-layer KV format negotiation. For dense-attention models (Llama, Qwen-dense, DeepSeek-R1-Distill) this is not an issue.
+
+### FlashInfer cubin `Permission denied` when running as NIS/LDAP user
+
+On clusters with NIS-managed users, FlashInfer attempts to write compiled CUDA kernels to its cache directory inside the container:
+
+```
+PermissionError: [Errno 13] Permission denied: '/opt/dynamo/venv/lib/.../flashinfer_cubin/cubins/flashinfer'
+```
+
+**Fix**: redirect the cache to a writable location:
+```bash
+-e FLASHINFER_CACHE_DIR=/tmp/flashinfer_cache
+```
+
 ### Decode worker crashes after each request with `Counters can only be incremented by non-negative amounts`
 
 The vLLM disagg metrics path reports `cached_tokens` as a negative value after KV transfer from prefill, crashing the Prometheus counter in `vllm/v1/metrics/loggers.py`:
