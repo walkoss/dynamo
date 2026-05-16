@@ -330,24 +330,39 @@ Two workers loading the model from NFS simultaneously can race on config file lo
 
 ## Experiment C: KVBM Conditional Disagg on Blackwell B100
 
-**Setup**: KVBM v2 conditional disagg (`DynamoConnector`) on 2x B100 Blackwell, same node, Qwen3-8B NVFP4, UCX host cache.
+**Setup**: KVBM v2 conditional disagg (`DynamoConnector`) on 2x B100 Blackwell, same node, Qwen3-8B BF16, host CPU KV cache (POSIX shared memory).
 
 **Key findings from setup:**
 - B100 runs NVFP4 natively via `NvFp4LinearBackend.FLASHINFER_CUTLASS` (Blackwell-native FP4 compute)
+- `_core.abi3.so` links at runtime to whichever `libnixl.so` appears first in `LD_LIBRARY_PATH`; the system NIXL at `/opt/nvidia/nvda_nixl/lib64/` is version 1.3.x, nixl_cu13 is 1.1.0 — they are **ABI-incompatible**; use nixl_cu13 consistently for both library and plugins
 - `nixl-cu13==1.1.0` must be used (not `nixl-cu12==0.10.1`) — they have separate libnixl instances; kvbm must be compiled against cu13 to use its plugin registry at runtime
-- UCX is required for `cache.host` (CPU memory cache); UCX libraries at `/usr/local/ucx/lib/` on b100_preprod nodes
-- `cache.host` requires UCX; `cache.device` is not a valid config key; `cache.disk` uses POSIX
-- Both nixl_cu13 libraries AND UCX must be in `LD_LIBRARY_PATH` when launching workers
-- `NIXL_PLUGIN_DIR` must point to nixl_cu13 plugins (not system NIXL)
+- `NIXL_PLUGIN_DIR` must point to nixl_cu13 plugins (not system NIXL at `/opt/nvidia/nvda_nixl/lib64/plugins/`)
+- `cache.host` with `cache_size_gb` must be large enough for concurrent requests: each 2048-token request needs ~896 MB of host KV cache (7 MB/block × 128 blocks); use ≥ 40 GB to avoid `Failed to allocate N destination blocks` errors under load
+- KVBM disagg in Docker on some b100_preprod nodes fails with `NIXL agent not found` due to node-level UCX/fabric differences; **use Pyxis** (`srun --container-image=...`) for reliable plugin injection
 
-**Measured**: single-request TTFT ~120ms for Qwen3-8B (9 prompt tokens, 20 output tokens).
+**Validated**: hub↔prefill↔decode handshake confirmed (Velo instance IDs matched); decode worker responded to test requests with TTFT ~42ms (short prompt) and ~120ms (warmup, 9 prompt tokens).
 
-**Launch env (Docker, b100_preprod):**
+**Full throughput benchmark**: pending — NIXL ABI variation across b100_preprod nodes prevents stable Docker-based benchmarking; Pyxis-based setup (srun) reliably resolves plugin discovery.
+
+**Launch env (nixl_cu13 + UCX, Docker):**
 ```bash
 NW13=/opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs
+mkdir -p /tmp/nixl-cu13/lib64
+ln -sf "$NW13/libnixl.so" /tmp/nixl-cu13/lib64/libnixl.so
 export LD_LIBRARY_PATH="/usr/local/ucx/lib:$NW13:$NW13/plugins:/opt/nvidia/nvda_nixl/lib64"
-export NIXL_PLUGIN_DIR="$NW13/plugins"
-export NIXL_PREFIX=/tmp/nixl-cu13  # symlink: lib64/libnixl.so → $NW13/libnixl.so
+export NIXL_PREFIX=/tmp/nixl-cu13      # symlink: lib64/libnixl.so → nixl_cu13
+export NIXL_PLUGIN_DIR="$NW13/plugins" # nixl_cu13 UCX+POSIX plugins
+
+# worker extra config (in kv_connector_extra_config):
+# "cache": {"host": {"cache_size_gb": 40.0}}   ← enough for concurrent 2048-token requests
+# Note: do NOT specify "nixl.backends" — let kvbm auto-detect from LD_LIBRARY_PATH
+```
+
+**Launch env (Pyxis, reliable on all b100_preprod):**
+```bash
+srun --jobid=$JOBID --overlap --container-image=nvcr.io/nvidian/dynamo-dev/vllm-dev:TAG \
+  --container-mounts=/home/scratch.mkosec_hw:/scratch \
+  bash -c "export PYTHONPATH=... && python3 -m vllm.entrypoints.openai.api_server ..."
 ```
 
 See `dynamo-pfaas/.claude/skills/disagg-bringup/launch-kvbm-docker.sh` for the full reproducible setup including all hard-won env var requirements.
