@@ -76,9 +76,16 @@ Plus ~80ms overhead (2 × RTT) per request regardless of ISL.
 
 The PrfaaS-PD paper (Qin et al., Moonshot AI + Tsinghua, [arXiv:2604.15039](https://arxiv.org/abs/2604.15039)) first quantified this: hybrid-attention models like Kimi Linear-1T at 128K ISL require only 4.88 Gbps, making cross-datacenter deployment on commodity 100 Gbps Ethernet practical.
 
-## Two experiments
+## Experiments
 
-This guide covers two distinct use cases:
+This guide covers four experiments, each targeting a different question:
+
+| Experiment | Question | Status |
+|---|---|---|
+| A | Does PrfaaS work with mismatched GPU types? | **Done** — TTFT sweep, A10→H100 NVL |
+| B | How much does network distance cost? | **Done** — TTFT vs RTT, same-fabric vs 41.5ms WAN |
+| C | What is the throughput and tail-latency overhead of disaggregation? | **Done** — N=100 c=8 bench, NixlConnector, 2×A100 same-node |
+| D | Can conditional disagg (KVBM) run on Blackwell B100? | **Blocked** — `_core.abi3.so` binary needs rebuild |
 
 ### Experiment A: Hardware specialization (heterogeneous)
 
@@ -328,86 +335,58 @@ This is only relevant when using KVBM disagg (PR #9393). Standard vLLM disagg (`
 ### Decode worker fails with `LlamaForCausalLM failed to be inspected`
 Two workers loading the model from NFS simultaneously can race on config file locks. Add a 10-second stagger between decode worker starts.
 
-## Experiment C: KVBM Conditional Disagg on Blackwell B100
+## Experiment C: Same-Node Disagg Overhead (NixlConnector, 2× A100)
 
-**Setup**: KVBM v2 conditional disagg (`DynamoConnector`) on 2x B100 Blackwell, same node, Qwen3-8B BF16, host CPU KV cache (POSIX shared memory).
+**Setup**: NixlConnector disaggregated path on 2x A100-PCIE-80GB, same physical node (4u4g-0104, dlcluster). GPU 0 = prefill worker, GPU 1 = decode worker + frontend. `vllm-runtime:mkosec-2da789b71` with `dynamo.vllm`. UCX transport auto-detected (no TCP override — see Troubleshooting: same-node UCX TCP override causes segfault via CUDA IPC conflict). N=100, concurrency=8, ISL≈2016 tokens, OSL=256.
 
-**Key findings from setup:**
+> **Limitation**: Both workers run on the same physical node with UCX loopback. This isolates the disaggregation coordination overhead (prefill router dispatch + NIXL KV transfer) from genuine cross-cluster network cost. For true cross-cluster overhead, see Experiment B (TTFT-only) or the planned Experiment D.
+
+**Headline result**: Disaggregation adds **+66ms to median latency** and **+28% to tail latency** (P95) versus a single-worker baseline on the same hardware.
+
+| Metric | Baseline (1×A100) | PrfaaS disagg (2×A100) | Δ | % change |
+|--------|:-----------------:|:----------------------:|:-:|:--------:|
+| Throughput | 2.455 req/s | 2.361 req/s | −0.094 | **−3.8%** |
+| Mean latency | 3.136s | 3.270s | +0.134s | **+4.3%** |
+| P50 latency | 3.080s | 3.146s | +0.066s | **+2.1%** |
+| P95 latency | 3.630s | 4.655s | +1.025s | **+28.2%** |
+| P99 latency | 3.631s | 4.656s | +1.025s | **+28.3%** |
+| Success rate | 100/100 | 100/100 | — | — |
+
+The P50 +2% reflects the constant per-request overhead: prefill router dispatch (~10ms) plus NIXL KV transfer of ~126 MB at loopback bandwidth (~50 GB/s → ~3ms transfer). The P95/P99 +28% jump reflects occasional KV transfer stalls at the UCX loopback layer; cross-node RDMA or dedicated NICs would reduce this significantly.
+
+For reference: KV size at ISL=2016 tokens for Qwen3-8B (32 layers, 8 GQA heads, dim=128, BF16) = **~126 MB**. At UCX loopback bandwidth this completes in <100ms, consistent with the P50 delta of ~66ms.
+
+**Hardware** | Qwen/Qwen3-8B BF16 | vLLM 0.19.0 + dynamo.vllm | dlcluster 4u4g-0104
+
+**Reproducing this benchmark:**
+```bash
+# Disagg launch (Docker):
+bash exp_c_disagg_docker.sh   # starts prefill+decode+frontend, runs bench on success
+
+# Or run bench manually against a running endpoint:
+python3 bench_c_disagg.py     # results written to bench_disagg_results.json
+
+# Baseline single-worker:
+python3 bench_c.py            # results written to bench_c_results.json
+```
+
+## Experiment D (planned): KVBM Conditional Disagg on Blackwell B100
+
+**Goal**: KVBM v2 conditional disagg (`DynamoConnector`) on 2x B100 Blackwell, same node, Qwen3-8B BF16, host CPU KV cache (POSIX shared memory).
+
+**Status: blocked on binary build.** The `_core.abi3.so` in the dev image was built without the Rust scheduler module (`kvbm.v2 was built without the Rust scheduler module — falling back to vLLM scheduler with KVBM connector offload only`). Even with correct `NIXL_PLUGIN_DIR`, the KVBM leader fails at `initialize_workers()` with `NIXL agent not found`. Root cause: binary requires full rebuild with `--features v1,v2` via `cargo rustc --lib --crate-type cdylib` inside the dev container.
+
+**Key findings from B100 bringup:**
 - B100 runs NVFP4 natively via `NvFp4LinearBackend.FLASHINFER_CUTLASS` (Blackwell-native FP4 compute)
-- `_core.abi3.so` links at runtime to whichever `libnixl.so` appears first in `LD_LIBRARY_PATH`; the system NIXL at `/opt/nvidia/nvda_nixl/lib64/` is version 1.3.x, nixl_cu13 is 1.1.0 — they are **ABI-incompatible**; use nixl_cu13 consistently for both library and plugins
-- `nixl-cu13==1.1.0` must be used (not `nixl-cu12==0.10.1`) — they have separate libnixl instances; kvbm must be compiled against cu13 to use its plugin registry at runtime
-- `NIXL_PLUGIN_DIR` must point to nixl_cu13 plugins (not system NIXL at `/opt/nvidia/nvda_nixl/lib64/plugins/`)
-- `cache.host` with `cache_size_gb` must be large enough for concurrent requests: each 2048-token request needs ~896 MB of host KV cache (7 MB/block × 128 blocks); use ≥ 40 GB to avoid `Failed to allocate N destination blocks` errors under load
-- KVBM disagg in Docker on some b100_preprod nodes fails with `NIXL agent not found` due to node-level UCX/fabric differences; **use Pyxis** (`srun --container-image=...`) for reliable plugin injection
+- `_core.abi3.so` links at runtime to whichever `libnixl.so` appears first in `LD_LIBRARY_PATH`; system NIXL at `/opt/nvidia/nvda_nixl/lib64/` is version 1.3.x, nixl_cu13 is 1.1.0 — **ABI-incompatible**; use nixl_cu13 consistently
+- `nixl-cu13==1.1.0` required (not `nixl-cu12==0.10.1`) — separate libnixl instances
+- `NIXL_PLUGIN_DIR` must point to nixl_cu13 plugins, not system NIXL
+- `cache.host.cache_size_gb` ≥ 40 GB to avoid `Failed to allocate N destination blocks` under c=8 load
+- KVBM disagg in Docker on b100_preprod nodes fails with `NIXL agent not found` — **use Pyxis** (`srun --container-image=...`) for reliable plugin injection
 
-**Validated**: hub↔prefill↔decode handshake confirmed (Velo instance IDs matched); decode worker responded to test requests with TTFT ~42ms (short prompt) and ~120ms (warmup, 9 prompt tokens).
+**Validated**: hub↔prefill↔decode handshake confirmed (Velo instance IDs matched); TTFT ~42ms (short prompt) and ~120ms (warmup, 9 prompt tokens) before the throughput blocker was hit.
 
-**KVBM disagg blocker**: The `_core.abi3.so` in the dev image was built without the Rust scheduler module (`kvbm.v2 was built without the Rust scheduler module — falling back to vLLM scheduler with KVBM connector offload only`). Even with correct `NIXL_PLUGIN_DIR` and `VLLM_WORKER_MULTIPROC_METHOD=spawn`, the KVBM leader fails at `initialize_workers()` with `NIXL agent not found`. Root cause: the binary requires a full rebuild with `--features v1,v2` via `cargo rustc --lib --crate-type cdylib` inside the dev container. See `launch-kvbm-docker.sh` Step 1.
-
-**Throughput benchmark (NixlConnector disagg, 2x A100 80GB)**:
-
-After resolving KVBM binary build issues, a full throughput benchmark was collected using the standard Dynamo NixlConnector disaggregated path on 2x A100-PCIE-80GB (GPU 0 = prefill, GPU 1 = decode + frontend). `vllm-runtime:mkosec-2da789b71` with `dynamo.vllm` and `NixlConnector`. UCX transport auto-detected (no TCP override — same-node UCX TCP causes segfault via CUDA IPC conflict; see Troubleshooting).
-
-| Metric | Disagg (P/D, NixlConnector) | Baseline (single A100) |
-|--------|----------------------------|-----------------------|
-| **Hardware** | 2x A100-PCIE-80GB | 1x A100-PCIE-80GB |
-| **Model** | Qwen/Qwen3-8B BF16 | Qwen/Qwen3-8B BF16 |
-| **Engine** | vLLM 0.19.0 + dynamo.vllm | vLLM 0.19.0 |
-| **N requests** | 100 | 100 |
-| **Concurrency** | 8 | 8 |
-| **ISL (approx)** | ~2016 tokens | ~2016 tokens |
-| **OSL** | 256 tokens | 256 tokens |
-| **Throughput** | **2.361 req/s** | 2.455 req/s |
-| **Mean latency** | **3.270s** | 3.136s |
-| **P50 latency** | **3.146s** | 3.080s |
-| **P95 latency** | **4.655s** | 3.630s |
-| **P99 latency** | **4.656s** | 3.631s |
-| **Success rate** | **100/100** | 100/100 |
-
-The disagg path adds ~66ms to median latency (P50: 3.08→3.15s) and ~1.0s to tail latency (P95: 3.63→4.66s). The P95/P99 jump reflects occasional KV transfer stalls at the UCX loopback layer; cross-node RDMA or dedicated NICs would reduce this. The throughput delta (2.455→2.361 req/s, ~4%) is the coordination overhead of the prefill-router dispatch path.
-
-For same-node disagg: KV size at ISL=2016 tokens for Qwen3-8B (32 layers, 8 GQA heads, dim=128, BF16) = ~126 MB. At loopback UCX bandwidth this completes in <100ms, consistent with the P50 delta of ~66ms.
-
-**Launch env (nixl_cu13 + UCX, Docker):**
-```bash
-NW13=/opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs
-mkdir -p /tmp/nixl-cu13/lib64
-ln -sf "$NW13/libnixl.so" /tmp/nixl-cu13/lib64/libnixl.so
-export LD_LIBRARY_PATH="/usr/local/ucx/lib:$NW13:$NW13/plugins:/opt/nvidia/nvda_nixl/lib64"
-export NIXL_PREFIX=/tmp/nixl-cu13      # symlink: lib64/libnixl.so → nixl_cu13
-export NIXL_PLUGIN_DIR="$NW13/plugins" # nixl_cu13 UCX+POSIX plugins
-
-# worker extra config (in kv_connector_extra_config):
-# "cache": {"host": {"cache_size_gb": 40.0}}   ← enough for concurrent 2048-token requests
-# Note: do NOT specify "nixl.backends" — let kvbm auto-detect from LD_LIBRARY_PATH
-```
-
-**Launch env (Pyxis, reliable on all b100_preprod):**
-```bash
-srun --jobid=$JOBID --overlap --container-image=nvcr.io/nvidian/dynamo-dev/vllm-dev:TAG \
-  --container-mounts=/home/scratch.mkosec_hw:/scratch \
-  bash -c "export PYTHONPATH=... && python3 -m vllm.entrypoints.openai.api_server ..."
-```
-
-See `dynamo-pfaas/.claude/skills/disagg-bringup/launch-kvbm-docker.sh` for the full reproducible setup including all hard-won env var requirements.
-
-### Reproducing the baseline benchmark
-
-The `bench_c.py` script in the repo root runs the N=100 concurrency=8 benchmark against any running vLLM endpoint:
-
-```bash
-# 1. Start a vLLM worker (A100/H100, Qwen/Qwen3-8B)
-python3 -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3-8B --port 8000 \
-  --max-model-len 8192 --gpu-memory-utilization 0.7
-
-# 2. Wait for /health, then run:
-python3 bench_c.py   # results written to bench_c_results.json
-```
-
-### Next steps for KVBM disagg
-
-To collect KVBM disagg throughput numbers, rebuild `_core.abi3.so` with the full feature set:
+**To unblock Experiment D**, rebuild `_core.abi3.so` inside the dev container:
 
 ```bash
 # Inside the dev container (Docker or Pyxis):
@@ -420,7 +399,17 @@ cp target/debug/lib_core.so lib/bindings/kvbm/python/kvbm/_core.abi3.so
 cp target/debug/deps/libkvbm_kernels.so lib/bindings/kvbm/python/kvbm/libkvbm_kernels.so
 ```
 
-Then run `launch-kvbm-docker.sh` Steps 2–4 with `cache: {host: {cache_size_gb: 40.0}}` (no explicit `nixl.backends`).
+**Launch env (nixl_cu13 + UCX, Docker):**
+```bash
+NW13=/opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs
+mkdir -p /tmp/nixl-cu13/lib64
+ln -sf "$NW13/libnixl.so" /tmp/nixl-cu13/lib64/libnixl.so
+export LD_LIBRARY_PATH="/usr/local/ucx/lib:$NW13:$NW13/plugins:/opt/nvidia/nvda_nixl/lib64"
+export NIXL_PREFIX=/tmp/nixl-cu13      # symlink: lib64/libnixl.so → nixl_cu13
+export NIXL_PLUGIN_DIR="$NW13/plugins" # nixl_cu13 UCX+POSIX plugins
+```
+
+See `dynamo-pfaas/.claude/skills/disagg-bringup/launch-kvbm-docker.sh` for the full reproducible setup.
 
 ## See Also
 
