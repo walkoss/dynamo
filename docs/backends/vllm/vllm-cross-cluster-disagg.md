@@ -78,15 +78,16 @@ The PrfaaS-PD paper (Qin et al., Moonshot AI + Tsinghua, [arXiv:2604.15039](http
 
 ## Experiments
 
-This guide covers four experiments, each targeting a different question:
+This guide covers six experiments, each targeting a different question:
 
 | Experiment | Question | Status |
 |---|---|---|
 | A | Does PrfaaS work with mismatched GPU types? | **Done** — TTFT sweep, A10→H100 NVL |
 | B | How much does network distance cost? | **Done** — TTFT vs RTT, same-fabric vs 41.5ms WAN |
 | C | What is the throughput and tail-latency overhead of disaggregation? | **Done** — N=100 c=8 bench, NixlConnector, 2×A100 same-node |
-| D | Can conditional disagg (KVBM) run end-to-end? | **Done** — 4.408 req/s at ISL=12 tokens (2×H100); ISL≥24 hangs (deferred v2 scheduler) |
-| E | What is the throughput on a realistic lognormal request distribution? | **Done** — lognormal(μ=7, σ=1.5) ISL, N=200 c=8, 2×H100 same-node (dlcluster ipp2-0493) |
+| D | Can conditional disagg (KVBM) run end-to-end on short prompts? | **Done** — historical bringup, 4.408 req/s at ISL=12 tokens (2×H100 same-node) |
+| E | What is the throughput on a realistic lognormal request distribution? | **Done** — lognormal(μ=7, σ=1.5) ISL, N=200 c=8, 2×H100 same-node |
+| F | What happens under realistic cross-cluster KVBM load? | **Done** — lognormal ISL, N=200 c=8, H100 prefill + H100 decode over WAN |
 
 ### Experiment A: Hardware specialization (heterogeneous)
 
@@ -132,13 +133,13 @@ This experiment requires two clusters with a genuine inter-datacenter link. Use 
 
 ### Experiment E: Realistic throughput (lognormal ISL, same-node H100+H100)
 
-**Hardware: 2×H100 PCIe (81 GB VRAM each), dlcluster ipp2-0493, same-node**
+**Hardware: 2×H100 PCIe (81 GB VRAM each), same-node**
 **NIXL transport: POSIX shared memory (SHM) — no UCX TCP**
-**Image: `nvcr.io/nvidian/dynamo-dev/vllm-runtime:mkosec-2da789b71`**
+**Image:** Dynamo vLLM runtime image built from the tested source revision
 
 Experiments A/B measured TTFT at fixed ISLs with `max_tokens=1`, which isolates the prefill+transfer path but doesn't capture realistic serving load. This experiment runs a sustained throughput benchmark with a lognormal ISL distribution matching real-world request patterns.
 
-**Why same-node instead of cross-cluster**: A cross-cluster attempt (A10 computelab → H100 dlcluster) was blocked by a UCX TCP bug in Docker containers — see `nixlUcxSharedThread` in Troubleshooting. Same-node NIXL uses POSIX SHM, bypassing UCX TCP entirely and giving clean, reproducible results. The cross-cluster TTFT data is in Experiments A/B.
+**Why same-node instead of cross-cluster**: A cross-cluster attempt (A10 prefill → H100 decode) was blocked by a UCX TCP bug in Docker containers — see `nixlUcxSharedThread` in Troubleshooting. Same-node NIXL uses POSIX SHM, bypassing UCX TCP entirely and giving clean, reproducible results. The cross-cluster TTFT data is in Experiments A/B.
 
 **Distribution**: lognormal(μ=7, σ=1.5), clipped [256, 8192] tokens — median ~1100 tokens, 95th percentile ~3900 tokens. This matches the SOLBench / Chatbot Arena shape where most requests are short but a long tail drives KV transfer costs.
 
@@ -171,19 +172,56 @@ Experiments A/B measured TTFT at fixed ISLs with `max_tokens=1`, which isolates 
 
 **Relation to Experiments A/B/C**: Exp C measured same-node throughput at fixed ISL=2048 (2.361 req/s, N=100). Exp E extends this with a lognormal ISL distribution and 2× more requests for tighter confidence intervals.
 
-To reproduce:
+To reproduce, launch a same-node prefill/decode pair using the same topology as Experiment C, then run the AIPerf workload with the parameters above:
 
 ```bash
-# 1. Allocate a 2-GPU node (dl-h100 has 2x H100)
-start_session(preset: "dl-h100", name: "exp-e")
+# 1. Allocate a 2-GPU node and start prefill + decode + frontend.
+# Use the same-node launch pattern from Experiment C.
 
-# 2. Run the combined experiment script
-bash /home/scratch.mkosec_hw/exp_e_h100_same_node.sh
-
-# 3. Wait for health on :8000, then benchmark via aiperf-mcp
-mcp__aiperf-mcp__create_spec(...)
-mcp__aiperf-mcp__run_profile(...)
+# 2. Wait for health on :8000, then run AIPerf with the benchmark parameters above.
+aiperf profile run ...
 ```
+
+### Experiment F: Cross-cluster KVBM lognormal (H100 prefill + hub ↔ H100 decode)
+
+**Hardware:** H100 prefill worker + KVBM hub on one cluster; H100 decode worker on a second cluster (cross-datacenter link, ~34ms RTT measured in Experiment B)
+**Stack:** KVBM v2 (`DynamoConnector`), `kvbm_hub`, and cross-cluster transfer (not same-node POSIX SHM)
+**Image:** Dynamo vLLM image that includes the KVBM v2 `RustScheduler` fix
+
+This is the realistic cross-datacenter serving shape: lognormal ISL under load, not the fixed-ISL TTFT sweeps in Experiments A/B.
+
+**Distribution:** lognormal(μ=7, σ=1.5) median ~1101 tokens (AIPerf `--isl 1101` or custom JSONL via `KVBM_BENCH_INPUT_FILE`), OSL=256, N=200, c=8.
+
+**Measured results** (2026-05-19, DeepSeek-R1-Distill-Llama-8B or Qwen3-8B class model, 393s benchmark):
+
+| Metric | Value |
+|--------|-------|
+| Requests | **200/200**, error_count=0 |
+| TTFT avg / p50 | **14,978ms / 14,994ms** |
+| ITL avg / p50 | **1.87ms / 1.81ms** |
+| Request throughput | **0.509 req/s** |
+| Output token throughput | **130 tok/s** |
+
+**Prefill log signals:** 200× `create_slot` with `has_kv_transfer=true`; 152× `prefill_finalize_observer_drained` (full G1→G2 disagg path); 48 unaccounted (possible `kv_load_failure_policy: recompute` fallback).
+
+**What we ruled out for the 15s TTFT:**
+
+| Hypothesis | Result |
+|------------|--------|
+| WAN RTT (~34ms between clusters) | Negligible vs 15s |
+| G1→G2 offload watchdog (`wait_secs=10`) on H100 prefill | **0 watchdog fires** on H100 (unlike A10 runs where this dominated) |
+| Decode slowness | ITL ~1.9ms — decode is fast once tokens arrive |
+
+**Open question:** The ~15s TTFT is **~67×** same-node aggregated KVBM bench (~223ms) and **~6×** Experiment E same-node lognormal TTFT p50 (2.4s). The bottleneck is in the **cross-cluster KVBM dispatch pipeline** (hub/connector coordination or prefill queueing at c=8), not raw network transfer.
+
+**Recommended decomposition runs:**
+
+KVBM v2 uses `block_size=16`; the Rust scheduler needs **≥2 G1 blocks** (ISL≥24). TTFT sweeps must use **≥32 tokens** on input and output (2 blocks), not `max_tokens=1`.
+
+1. Fixed-ISL TTFT sweep: ISL=1101, OSL=32 (2 blocks), `c=1`, N=20 — isolate per-request pipeline without queue overlap
+2. Same with `c=8` — separate queueing from per-request cost
+3. `disagg_multi_cluster_benchmark.py` with `--min-blocks 2` (default) for fixed-ISL TTFT sweeps
+4. Compare same-node `lognormal-bench.sh` vs cross-cluster setup
 
 ## Prerequisites
 
@@ -407,13 +445,13 @@ Exception: No UCX plugin found
 Exception: No POSIX plugin found
 ```
 
-**Root cause**: NIXL's plugin discovery (`nixl_agent.cpp`) looks for backend plugins (UCX, POSIX, CUDA) as shared libraries installed at the system level. These are present on dlcluster nodes at the host level but are NOT injected into Docker containers. Only Pyxis/srun-launched containers on dlcluster have access to these host-level NIXL plugins.
+**Root cause**: NIXL's plugin discovery (`nixl_agent.cpp`) looks for backend plugins (UCX, POSIX, CUDA) as shared libraries installed at the system level. On some managed SLURM clusters, those plugins are available on the host but are not injected into Docker containers. Pyxis or `srun`-launched containers may have access to the host-level plugins when plain Docker does not.
 
-**Fix**: use Pyxis (`srun --container-image=...`) instead of Docker on dlcluster nodes. See the `disagg-bringup/launch-kvbm-docker.sh` script for Docker-specific workarounds and notes. For production KVBM disagg on dlcluster, use Pyxis:
+**Fix**: if Docker cannot see the NIXL plugins, use the cluster-supported container runtime, such as Pyxis (`srun --container-image=...`):
 
 ```bash
 srun --jobid=$JOBID --overlap --container-name=my-session \
-  bash -c "source env.sh && bash .claude/skills/disagg-bringup/launch-prefill.sh"
+  bash -c "source env.sh && ./examples/backends/vllm/launch/disagg_multi_cluster_prefill.sh"
 ```
 
 This is only relevant when using KVBM disagg (PR #9393). Standard vLLM disagg (`NixlConnector`) handles transport differently and works in Docker.
@@ -423,9 +461,9 @@ Two workers loading the model from NFS simultaneously can race on config file lo
 
 ## Experiment C: Same-Node Disagg Overhead (NixlConnector, 2× A100)
 
-**Setup**: NixlConnector disaggregated path on 2x A100-PCIE-80GB, same physical node (4u4g-0104, dlcluster). GPU 0 = prefill worker, GPU 1 = decode worker + frontend. `vllm-runtime:mkosec-2da789b71` with `dynamo.vllm`. UCX transport auto-detected (no TCP override — see Troubleshooting: same-node UCX TCP override causes segfault via CUDA IPC conflict). N=100, concurrency=8, ISL≈2016 tokens, OSL=256.
+**Setup**: NixlConnector disaggregated path on 2×A100-PCIE-80GB, same physical node. GPU 0 = prefill worker, GPU 1 = decode worker + frontend. UCX transport auto-detected (no TCP override — see Troubleshooting: same-node UCX TCP override causes segfault via CUDA IPC conflict). N=100, concurrency=8, ISL≈2016 tokens, OSL=256.
 
-> **Limitation**: Both workers run on the same physical node with UCX loopback. This isolates the disaggregation coordination overhead (prefill router dispatch + NIXL KV transfer) from genuine cross-cluster network cost. For true cross-cluster overhead, see Experiment B (TTFT-only) or the planned Experiment D.
+> **Limitation**: Both workers run on the same physical node with UCX loopback. This isolates the disaggregation coordination overhead (prefill router dispatch + NIXL KV transfer) from genuine cross-cluster network cost. For true cross-cluster overhead, see Experiment B (TTFT-only) and Experiment F (KVBM under load).
 
 **Headline result**: Disaggregation adds **+66ms to median latency** and **+28% to tail latency** (P95) versus a single-worker baseline on the same hardware.
 
@@ -442,31 +480,32 @@ The P50 +2% reflects the constant per-request overhead: prefill router dispatch 
 
 For reference: KV size at ISL=2016 tokens for Qwen3-8B (32 layers, 8 GQA heads, dim=128, BF16) = **~126 MB**. At UCX loopback bandwidth this completes in <100ms, consistent with the P50 delta of ~66ms.
 
-**Hardware** | Qwen/Qwen3-8B BF16 | vLLM 0.19.0 + dynamo.vllm | dlcluster 4u4g-0104
+**Hardware** | Qwen/Qwen3-8B BF16 | vLLM 0.19.0 + dynamo.vllm | 2×A100 same-node
 
 **Reproducing this benchmark:**
 ```bash
-# Disagg launch (Docker):
-bash exp_c_disagg_docker.sh   # starts prefill+decode+frontend, runs bench on success
+# Disagg launch:
+./examples/backends/vllm/launch/disagg_multi_cluster_prefill.sh
+./examples/backends/vllm/launch/disagg_multi_cluster_decode.sh
 
 # Or run bench manually against a running endpoint:
-python3 bench_c_disagg.py     # results written to bench_disagg_results.json
+python3 examples/backends/vllm/launch/disagg_multi_cluster_benchmark.py
 
 # Baseline single-worker:
-python3 bench_c.py            # results written to bench_c_results.json
+python3 benchmarks/benchmark_serving.py ...
 ```
 
-## Experiment D (blocked): KVBM Conditional Disagg on Blackwell B100
+## Experiment D: KVBM Conditional Disagg Bringup (Historical)
 
-**Goal**: KVBM v2 conditional disagg (`DynamoConnector`) on 2x B100 Blackwell, same node, Qwen3-8B BF16, host CPU KV cache (POSIX shared memory).
+**Goal**: KVBM v2 conditional disagg (`DynamoConnector`) on a 2×GPU same-node setup, Qwen3-8B BF16, host CPU KV cache (POSIX shared memory).
 
-**Status: benchmark completed at max working ISL (12 tokens).** The full KVBM conditional disagg pipeline runs end-to-end. The deferred v2 Rust scheduler limits the working ISL to ≤12 tokens; ISL≥24 tokens triggers a hung disagg path.
+**Status:** this earlier bringup validated the short-prompt KVBM path at ISL=12 tokens. For the current ≥2-block cross-cluster KVBM path, use a build that includes the RustScheduler fix and see Experiment F.
 
 ### Benchmark results (N=100, c=8, ISL=12 tokens, OSL=256)
 
 | Metric | Value |
 |--------|-------|
-| Hardware | 2× H100-80GB, dlcluster 4u4g-0073 |
+| Hardware | 2×H100-80GB same-node |
 | Model | Qwen/Qwen3-8B BF16 |
 | Connector | DynamoConnector (KVBM v2, vLLM scheduler fallback) |
 | Working ISL | **12 tokens** (≤1 KV block — see limitation below) |
@@ -481,7 +520,7 @@ python3 bench_c.py            # results written to bench_c_results.json
 
 Tight P50/P95/P99 clustering (~10ms spread) reflects decode-dominated latency: at ISL=12 tokens the prefill is instantaneous; all 256 decode tokens run on H100 with consistent throughput. Full results in `bench_d_results.json`.
 
-### What was validated (2x H100, dlcluster 4u4g-0073)
+### What was validated (2×H100 same-node)
 
 - `_core.abi3.so` rebuilt with `cargo rustc --lib --crate-type cdylib --features v1,v2` ✓
 - `DYN_KVBM_CPU_CACHE_GB=40` env var required — JSON `cache.host` alone not sufficient (Figment profile parsing issue) ✓
@@ -495,41 +534,27 @@ Tight P50/P95/P99 clustering (~10ms spread) reflects decode-dominated latency: a
 
 KVBM "conditional" disagg decides per-request whether to route to a separate prefill worker. Short prompts are processed locally (hub not involved). Long prompts are dispatched via the hub's CD dispatcher to the prefill worker. Verified by inspection: a 9-token "hi" request does NOT appear in hub logs; ISL~2016 tokens DOES trigger hub dispatch.
 
-### The runtime blocker for long ISL
+### Historical runtime blocker for long ISL
 
-When ISL crosses the disagg threshold:
+Earlier KVBM v2 builds could dispatch long prompts to the hub and prefill worker, but the decode-side transfer kick was missing in the fallback scheduler path:
 
 1. Decode worker sends request to hub
 2. Hub dispatches `PrefillRequest` to prefill (:8001) — **confirmed working** in hub log
 3. Prefill processes prompt and finishes — **confirmed working** in prefill log
 4. Prefill waits for decode to send "onboard kick" to begin KV transfer — **stuck here**
-5. Decode never sends the kick because the v2 Rust scheduler (which manages this handshake) is deferred
+5. Decode never sends the kick because that fallback path does not manage the handshake
 6. Hub retries the same request every 10 seconds indefinitely
 
-Root code: `lib/bindings/kvbm/src/v2/mod.rs`:
-
-```rust
-// pub mod scheduler;
-//
-// DEFERRED — the scheduler/{mod,config,status}.rs files reference types from
-// the pre-decomposition dynamo_kvbm crate. Phase 5 of the ACTIVE_PLAN does not
-// need the Rust scheduler; restoring it is shadow-mode divergence work.
-```
-
-The Python fallback (`DynamoScheduler` → vLLM scheduler) handles request intake but doesn't implement the decode-side "onboard kick" that tells prefill to transfer KV. Requests for long ISL hang indefinitely; the Python client eventually times out (300s).
-
-### To unblock Experiment D
-
-Implement the deferred scheduler module per ACTIVE_PLAN Phase 5. Specifically: the decode-side "send onboard kick" in the disagg coordinator that triggers KV transfer from prefill. All infrastructure is ready.
+Use the RustScheduler-enabled KVBM build for long-prompt or cross-cluster validation. The results in Experiment F were collected with that path.
 
 ### Hard-won bringup notes (preserved for when scheduler is ported)
 
 - `DYN_KVBM_CPU_CACHE_GB=40` env var is required — JSON `cache.host.cache_size_gb` does not properly reach the Rust config via Figment profile selection
 - `cache.device` is NOT a valid KVBM tier — only `host` (G2/CPU) and `disk` (G3)
 - `srun -e KEY=VAL` means `--error` (stderr redirect), NOT env var — use `export` inside `bash -c "..."`
-- Container image has `NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins` baked in (system NIXL has no UCX) — override via `export NIXL_PLUGIN_DIR=.../nixl_cu13.mesonpy.libs/plugins` inside bash -c
+- Container images may set `NIXL_PLUGIN_DIR` to a path without UCX/POSIX plugins — override it to the plugin directory available in your runtime inside `bash -c`
 - All KVBM components must share `--container-name` so NIXL agents can find each other via POSIX shared memory
-- See `exp_d_kvbm_launch.sh` in this repo and `dynamo-pfaas/.claude/skills/disagg-bringup/` for the full launch setup
+- Keep the launch setup in repo-local scripts so cluster names, private paths, and credentials do not leak into this guide
 
 ## See Also
 
