@@ -1,0 +1,26 @@
+{
+  "experiment": "Exp D - KVBM v2 conditional disagg end-to-end, 2x H100-80GB, Qwen/Qwen3-8B BF16",
+  "hardware": "2x H100-80GB, dlcluster 4u4g-0073, same-node --container-name shared IPC",
+  "note": "Working ISL range for KVBM conditional disagg on ryan/kvbm-rdma-pull is <=12 tokens (1 KV block threshold). ISL>=24 tokens triggers the hung disagg path due to deferred v2 Rust scheduler in v2/mod.rs. This benchmark runs at max working ISL (12 tokens). DYN_KVBM_CPU_CACHE_GB=40 env var required for NIXL UCX initialization.",
+  "config": {
+    "N": 100,
+    "concurrency": 8,
+    "ISL_tokens": 12,
+    "prompt": "the quick brown fox",
+    "OSL_tokens": 256,
+    "avg_actual_completion_tokens": 252
+  },
+  "results": {
+    "n_success": 100,
+    "n_total": 100,
+    "total_s": 22.68,
+    "throughput_req_per_s": 4.408,
+    "latency_mean_s": 1.747,
+    "latency_p50_s": 1.772,
+    "latency_p95_s": 1.782,
+    "latency_p99_s": 1.789,
+    "http_codes": {
+      "200": 100
+    }
+  }
+}
