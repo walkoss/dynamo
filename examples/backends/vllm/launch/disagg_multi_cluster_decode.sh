@@ -61,7 +61,7 @@ for gpu in "${GPUS[@]}"; do
     python3 -m "$WORKER_MODULE" \
         --model "$MODEL" \
         --disaggregation-mode decode \
-        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"enforce_handshake_compat":false}}' \
         --kv-events-config '{"enable_kv_cache_events":false}' \
         "$@" &
     ((port++))

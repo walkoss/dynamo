@@ -80,8 +80,9 @@ srun --jobid=$JOBID --overlap --container-name=$CONTAINER_NAME \
 echo "[$(date)] Hub started, waiting 10s..."
 sleep 10
 
-PREFILL_CFG='{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_module_path":"kvbm.v2.vllm.schedulers.connector","kv_connector_extra_config":{"leader":{"disagg":{"hub_url":"http://127.0.0.1:1337","role":"prefill"},"cache":{"host":{"cache_size_gb":40.0}},"tokio":{"worker_threads":4}},"worker":{"tokio":{"worker_threads":4}}}}'
-DECODE_CFG='{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_module_path":"kvbm.v2.vllm.schedulers.connector","kv_connector_extra_config":{"leader":{"disagg":{"hub_url":"http://127.0.0.1:1337","role":"decode"},"cache":{"host":{"cache_size_gb":40.0}},"tokio":{"worker_threads":4}},"worker":{"tokio":{"worker_threads":4}}}}'
+# Added per validated skill: nixl.backends required for UCX/POSIX plugin loading in worker
+PREFILL_CFG='{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_module_path":"kvbm.v2.vllm.schedulers.connector","kv_connector_extra_config":{"leader":{"disagg":{"hub_url":"http://127.0.0.1:1337","role":"prefill"},"cache":{"host":{"cache_size_gb":40.0}},"tokio":{"worker_threads":4}},"worker":{"nixl":{"backends":{"UCX":{},"POSIX":{}}},"tokio":{"worker_threads":4}}}}'
+DECODE_CFG='{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_module_path":"kvbm.v2.vllm.schedulers.connector","kv_connector_extra_config":{"leader":{"disagg":{"hub_url":"http://127.0.0.1:1337","role":"decode"},"cache":{"host":{"cache_size_gb":40.0}},"tokio":{"worker_threads":4}},"worker":{"nixl":{"backends":{"UCX":{},"POSIX":{}}},"tokio":{"worker_threads":4}}}}'
 
 # Step 3: Start prefill in the SAME named container
 echo "[$(date)] Starting prefill (GPU 0, port 8001) in container '$CONTAINER_NAME'..."
@@ -105,6 +106,8 @@ srun --jobid=$JOBID --overlap --container-name=$CONTAINER_NAME \
     python3 -m vllm.entrypoints.openai.api_server \
       --model $MODEL --port 8001 \
       --max-model-len 8192 --gpu-memory-utilization 0.7 \
+      --max-num-seqs 32 --enable-chunked-prefill \
+      --no-enable-prefix-caching \
       --kv-transfer-config '$PREFILL_CFG' \
       >> /scratch/prefill_d.log 2>&1" &
 echo "[$(date)] Prefill PID=$!"
@@ -132,6 +135,8 @@ srun --jobid=$JOBID --overlap --container-name=$CONTAINER_NAME \
     python3 -m vllm.entrypoints.openai.api_server \
       --model $MODEL --port 8000 \
       --max-model-len 8192 --gpu-memory-utilization 0.7 \
+      --max-num-seqs 32 --enable-chunked-prefill \
+      --no-enable-prefix-caching \
       --kv-transfer-config '$DECODE_CFG' \
       >> /scratch/decode_d.log 2>&1" &
 echo "[$(date)] Decode PID=$!"

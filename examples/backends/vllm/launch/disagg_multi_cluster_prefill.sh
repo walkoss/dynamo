@@ -20,6 +20,7 @@
 set -e
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
@@ -60,8 +61,9 @@ VLLM_NIXL_SIDE_CHANNEL_HOST="$VLLM_NIXL_SIDE_CHANNEL_HOST" \
 python3 -m "$WORKER_MODULE" \
     --model "$MODEL" \
     --disaggregation-mode prefill \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"enforce_handshake_compat":false}}' \
     --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20081\",\"enable_kv_cache_events\":true}" \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
     "$@" &
 
 wait_any_exit
