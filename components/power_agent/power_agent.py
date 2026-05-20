@@ -114,33 +114,68 @@ def _load_previously_managed_gpus() -> set[str]:
     the agent's startup. Per PR #9682 CodeRabbit review, this catches a
     superset of the original (FileNotFoundError, JSONDecodeError) cases:
 
-      * OSError (PermissionError, IsADirectoryError, I/O errors) — disk
-        problems on the host volume should NOT brick the agent.
-      * Non-dict JSON root — a file with a top-level list / int / string
-        / null would have crashed ``.get(...)`` with ``AttributeError``.
-      * Non-list ``managed_uuids`` — a misshapen value would have crashed
-        ``set(non_iterable)`` with ``TypeError``.
+      * OSError (PermissionError, IsADirectoryError, NotADirectoryError,
+        I/O errors) — disk problems on the host volume should NOT brick
+        the agent. Returning empty means we lose the orphan-recovery
+        opportunity for this restart, which is strictly better than
+        CrashLoopBackOff with no caps actuated.
+      * Non-dict JSON root — a file containing a top-level list / int /
+        string / null would have crashed `.get(...)` with AttributeError.
+      * Non-list `managed_uuids` — a misshapen value would have crashed
+        `set(...)` (int) or silently iterated characters (string).
+      * Non-string entries — bytes / ints / None inside the list could
+        flow through to downstream `in _previously_managed` checks
+        comparing against `str` UUIDs and silently never match. Coerce
+        the type guard at the boundary instead.
 
-    Returning empty means we lose the orphan-recovery opportunity for
-    this restart, which is strictly better than CrashLoopBackOff with
-    no caps actuated.
+    Every malformed-state branch logs at WARNING and returns ``set()``
+    so the operator can spot the corruption in pod logs without losing
+    cap-write availability.
     """
     try:
         with open(_MANAGED_STATE_PATH) as f:
-            payload = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("Failed to read managed GPU state: %s", e)
+            raw = json.load(f)
+    except FileNotFoundError:
         return set()
-    if not isinstance(payload, dict):
+    except (OSError, json.JSONDecodeError) as e:
         logger.warning(
-            "Managed GPU state has non-dict root: %s", type(payload).__name__
+            "Failed to read managed-GPU state at %s (%s: %s); "
+            "treating as empty. Orphan recovery will skip this startup.",
+            _MANAGED_STATE_PATH,
+            type(e).__name__,
+            e,
         )
         return set()
-    uuids = payload.get("managed_uuids", [])
-    if not isinstance(uuids, list):
-        logger.warning("managed_uuids is not a list: %s", type(uuids).__name__)
+
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Managed-GPU state at %s has unexpected root type %s "
+            "(expected object); treating as empty.",
+            _MANAGED_STATE_PATH,
+            type(raw).__name__,
+        )
         return set()
-    return set(uuids)
+
+    uuids = raw.get("managed_uuids", [])
+    if not isinstance(uuids, list):
+        logger.warning(
+            "Managed-GPU state at %s has unexpected managed_uuids type "
+            "%s (expected list); treating as empty.",
+            _MANAGED_STATE_PATH,
+            type(uuids).__name__,
+        )
+        return set()
+
+    valid = {u for u in uuids if isinstance(u, str)}
+    if len(valid) != len(uuids):
+        logger.warning(
+            "Managed-GPU state at %s contained %d non-string entries; "
+            "dropping them. Kept %d valid UUID(s).",
+            _MANAGED_STATE_PATH,
+            len(uuids) - len(valid),
+            len(valid),
+        )
+    return valid
 
 
 def _persist_managed_gpus(uuids: set[str]) -> None:
@@ -387,14 +422,16 @@ def _handle_sigterm(signum, frame):
         else:
             pynvml.nvmlShutdown()
     except Exception:
-        # We MUST proceed to ``_shutdown.set()`` so the run loop unblocks
+        # We MUST proceed to `_shutdown.set()` so the run loop unblocks
         # and the container exits cleanly — re-raising here would leave
         # the agent hung on SIGTERM. But silently dropping the failure
-        # made shutdown-time NVML faults impossible to diagnose from pod
-        # logs (PR #9682 CodeRabbit review). ``logger.exception`` writes
-        # the full traceback at ERROR level so operators can correlate
-        # with driver / hostengine events.
-        logger.exception("nvmlShutdown raised; proceeding with agent exit anyway.")
+        # made shutdown-time NVML/DCGM faults impossible to diagnose
+        # from pod logs (PR #9682 CodeRabbit review on power_agent.py:355).
+        # `logger.exception` writes the full traceback at ERROR level so
+        # operators can correlate with hostengine / driver events.
+        logger.exception(
+            "Actuator/NVML shutdown raised; proceeding with agent exit anyway.",
+        )
     _shutdown.set()
 
 
@@ -669,17 +706,17 @@ class PowerAgent:
         if not pids:
             return  # no K8s workload on this GPU
 
-        # Deduplicate by pod UID before building ``pod_annotations``. A
+        # Deduplicate by pod UID before building `pod_annotations`. A
         # single pod commonly runs multiple GPU processes (one per rank
         # in a TP/PP/EP topology, helper workers, profilers, etc.); the
         # pre-fix code emitted one entry per PID and would treat a
         # one-pod / two-PID GPU as if two pods were colocated. That
         # both fired the spurious "multi-pod-per-GPU" WARNING and, when
         # the pod's annotation was missing/invalid, took the
-        # conflict-resolution branch in ``_resolve_cap_for_gpu`` (since
-        # ``len(pod_annotations) > 1`` was true), incorrectly applying
+        # conflict-resolution branch in `_resolve_cap_for_gpu` (since
+        # `len(pod_annotations) > 1` was true), incorrectly applying
         # safe_default + bumping multi_pod_gpu_total. Per PR #9682
-        # CodeRabbit review.
+        # CodeRabbit review (power_agent.py:636).
         seen_uids: set[str] = set()
         pod_annotations: list[tuple[str, Optional[str]]] = []
         for pid in pids:
