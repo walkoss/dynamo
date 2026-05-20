@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# ISL sweep for cross-cluster disaggregated serving (Prefill as a Service).
+# TTFT sweep for Prefill as a Service using vLLM's direct NIXL connector.
 # Measures TTFT at increasing input sequence lengths to characterize network
 # overhead in the KV transfer path.
 #
 # Usage:
-#   python3 disagg_multi_cluster_benchmark.py --endpoint http://<decode_node>:8000
-#   python3 disagg_multi_cluster_benchmark.py --endpoint http://<decode_node>:8000 --max-isl 32768
+#   python3 ttft_sweep.py --endpoint http://<decode_node>:8000
+#   python3 ttft_sweep.py --endpoint http://<decode_node>:8000 --max-isl 32768
 #
 # Notes:
 #   - Run AFTER both prefill and decode workers are registered (check /health endpoint)

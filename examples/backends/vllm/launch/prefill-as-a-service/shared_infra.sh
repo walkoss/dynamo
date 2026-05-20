@@ -9,7 +9,7 @@
 # primary IP so remote workers can reach them.
 #
 # Usage:
-#   bash disagg_multi_cluster_infra.sh
+#   bash shared_infra.sh
 #
 # After running, export the printed values on your prefill and decode nodes:
 #   export ETCD_ENDPOINTS=http://<this_ip>:2379

@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Throughput benchmark for cross-cluster disaggregated serving (Experiment E).
-# Uses a lognormal ISL distribution to model real-world request patterns.
+# Throughput benchmark for Prefill as a Service using a lognormal ISL
+# distribution to model real-world request patterns.
 #
 # Usage:
-#   python3 disagg_multi_cluster_throughput_bench.py \
+#   python3 lognormal_throughput.py \
 #       --endpoint http://<decode_node>:8000 \
 #       --n 200 --concurrency 8 --osl 256
 #
@@ -176,12 +176,8 @@ def main() -> None:
     n = len(lats)
 
     out = {
-        "experiment": "Exp E — Cross-cluster throughput (lognormal ISL)",
-        "hardware": {
-            "prefill": "A10 24GB (computelab ipp1-1133)",
-            "decode": "H100 PCIe 81GB (dlcluster ipp2-0493)",
-            "inter_cluster_rtt_ms": 4.8,
-        },
+        "scenario": "nixl_lognormal_throughput",
+        "topology": "prefill_as_a_service",
         "config": {
             "model": args.model,
             "N": args.n,
@@ -210,7 +206,7 @@ def main() -> None:
         },
     }
 
-    print("\n=== Experiment E Results ===")
+    print("\n=== Lognormal throughput results ===")
     print(f"  Throughput:   {out['results']['throughput_req_per_s']} req/s")
     print(f"  P50 latency:  {out['results']['latency_p50_s']}s")
     print(f"  P95 latency:  {out['results']['latency_p95_s']}s")

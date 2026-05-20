@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Cross-cluster disaggregated serving: decode node.
+# Prefill as a Service using vLLM's direct NIXL connector: decode node.
 # Run this script on the decode cluster.
-# Run disagg_multi_cluster_prefill.sh on the prefill cluster simultaneously.
+# Run nixl_prefill_worker.sh on the prefill cluster simultaneously.
 #
 # Prerequisites:
 #   - ETCD_ENDPOINTS points to a shared etcd reachable from BOTH clusters
@@ -14,7 +14,7 @@
 # Example (2 decode workers + frontend on a 2-GPU node):
 #   ETCD_ENDPOINTS=http://10.0.1.5:2379 \
 #   NATS_SERVER=nats://10.0.1.5:4222 \
-#   ./disagg_multi_cluster_decode.sh
+#   ./nixl_decode_frontend.sh
 
 set -e
 
@@ -22,7 +22,7 @@ MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 DECODE_GPUS="${DECODE_GPUS:-0}"
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
 set -- "${REMAINING_ARGS[@]}"

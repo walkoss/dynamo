@@ -83,14 +83,16 @@ The experiments are easiest to read as a progression:
 1. Prove the simple vLLM disaggregated path works across clusters.
 2. Isolate network-distance cost with fixed-input TTFT sweeps.
 3. Measure serving overhead under load on same-node hardware.
-4. Move to KVBM when the question changes from "can KV move?" to "can Dynamo schedule conditional, multi-tier KV movement?"
-5. Measure the current KVBM cross-cluster pipeline under realistic load.
+4. Move to KVBM when the question changes from "can KV move?" to "can Dynamo schedule conditional, multi-tier, peer-to-peer KV movement?"
+5. Compare the same model and workload on same-node vs different-datacenter KVBM/P2P deployments.
 
 ### Terminology
 
 **`NixlConnector`** is the standard vLLM disaggregated connector used by `dynamo.vllm`. It is the simplest path for proving that a prefill worker can transfer KV to a decode worker. It is useful for clean TTFT and throughput measurements because there is no KVBM hub or conditional scheduling path in the middle.
 
 **KVBM / `DynamoConnector`** is Dynamo's KV block manager path. It adds the KVBM hub, scheduler, and G1/G2/G3 cache-tier logic. Use this path when testing conditional disaggregation, multi-tier KV management, or cross-cluster transfer through Dynamo's KVBM control plane. It is more representative of the target architecture, but it has more moving parts than `NixlConnector`.
+
+**KVBM P2P / RDMA-pull path** is the newer KVBM data-transfer path for peer-to-peer KV movement between workers. It keeps the KVBM control-plane model but avoids treating the hub as the data path. This is the right path for the same-node vs different-datacenter comparison because it measures the intended KVBM architecture rather than the simpler direct vLLM `NixlConnector` path.
 
 **Transport** is below the connector. Cross-cluster runs use UCX TCP. Same-node runs use POSIX shared memory or UCX loopback. A connector change (`NixlConnector` vs KVBM) and a transport change (TCP vs SHM) are separate variables.
 
@@ -101,21 +103,23 @@ The experiments are easiest to read as a progression:
 | A | `NixlConnector` | A10 prefill → H100 NVL decode, same-campus fabric | Fixed ISL TTFT, `max_tokens=1` | Prove heterogeneous prefill/decode works across a real inter-cluster link | 4K/8K/16K TTFT: 0.144s / 0.161s / 0.281s | Move from "does it work?" to "what does distance cost?" |
 | B | `NixlConnector` | Same hardware classes, same-fabric vs WAN | Fixed ISL TTFT, warm NIXL connection | Isolate network-distance and KV-size overhead | WAN overhead scales with KV size; effective bandwidth was ~30-40 Gbps | TTFT sweeps do not answer throughput or tail latency under load |
 | C | `NixlConnector` | 2×A100 same-node | N=100, c=8, ISL≈2016, OSL=256 | Measure disaggregation overhead without WAN variability | Median latency +66ms; tail latency +28%; throughput -3.8% | Need a more realistic ISL distribution |
-| E | `NixlConnector` | 2×H100 same-node | Lognormal ISL, N=200, c=8, OSL=256 | Measure throughput under a realistic request distribution while avoiding UCX TCP instability | 1.53 req/s, TTFT p50 2.44s, 200/200 success | The target architecture needs KVBM, not only direct vLLM KV transfer |
 | D | KVBM / `DynamoConnector` fallback path | 2×H100 same-node | Short-prompt ISL=12, N=100, c=8 | Bring up the KVBM path and validate short prompts before cross-cluster load | 4.408 req/s, 100/100 success; longer prompts needed the RustScheduler path | Use a RustScheduler-enabled build for real KVBM disaggregation |
-| F | KVBM / `DynamoConnector` + hub | H100 prefill + hub → H100 decode over WAN | Lognormal ISL, N=200, c=8, OSL=256 | Test the realistic cross-cluster KVBM shape under load | 0.509 req/s, TTFT p50 ~15s, 200/200 success | Decompose hub/connector queueing vs transfer cost |
+| E | KVBM P2P / RDMA-pull path | Same model, same AIPerf workload, same-node vs different-datacenter | Lognormal ISL, N=200, c=8, OSL=256 | Compare deployment distance for the intended KVBM/P2P architecture | Cross-DC leg: 0.509 req/s, TTFT p50 ~15s, 200/200 success; same-node KVBM/P2P leg still needed | Decompose P2P transfer cost vs queueing/control-plane cost |
+| NIXL baseline | `NixlConnector` | 2×H100 same-node | Lognormal ISL, N=200, c=8, OSL=256 | Establish a simple direct-transfer baseline for the same workload | 1.53 req/s, TTFT p50 2.44s, 200/200 success | Useful baseline, but not the KVBM/P2P comparison target |
 
 ### Why the path changed
 
-Experiments A, B, C, and E intentionally use `NixlConnector`. That path answers the base serving questions with the fewest variables: can KV move across clusters, how much does network distance add, and what is the overhead under load when KVBM is not involved?
+Experiments A, B, C, and the NIXL baseline intentionally use `NixlConnector`. That path answers the base serving questions with the fewest variables: can KV move across clusters, how much does network distance add, and what is the overhead under load when KVBM is not involved?
 
-Experiments D and F move to KVBM because the target architecture is not just direct point-to-point KV transfer. KVBM is the Dynamo path for conditional disaggregation and tiered KV placement. The tradeoff is that KVBM introduces hub dispatch, scheduler coordination, cache-tier state, and block-size constraints. The ~15s TTFT in Experiment F should therefore be read as a KVBM pipeline result, not as a pure WAN bandwidth result.
+Experiments D and E move to KVBM because the target architecture is not just direct point-to-point KV transfer. KVBM is the Dynamo path for conditional disaggregation and tiered KV placement. The P2P/RDMA-pull path is the current direction for KVBM data movement, so the important comparison is same-node KVBM/P2P vs different-datacenter KVBM/P2P on the same model and AIPerf workload.
+
+The ~15s TTFT in the cross-datacenter KVBM run should therefore be read as a KVBM/P2P pipeline result, not as a pure WAN bandwidth result. The missing datapoint is the same-node KVBM/P2P run with the identical AIPerf profile.
 
 The short version:
 
 - Use A/B to reason about raw cross-cluster feasibility and KV transfer slope.
-- Use C/E to reason about `NixlConnector` throughput without WAN noise.
-- Use D/F to reason about KVBM readiness and where its cross-cluster pipeline currently spends time.
+- Use C and the NIXL baseline to reason about direct-transfer throughput without KVBM.
+- Use D/E to reason about KVBM readiness and where its P2P cross-cluster pipeline currently spends time.
 
 ### Experiment A: Hardware specialization (heterogeneous)
 
@@ -159,13 +163,13 @@ Note: a cold NIXL connection (first request after worker startup) adds ~0.79s of
 
 This experiment requires two clusters with a genuine inter-datacenter link. Use the KV size table above to predict expected transfer times at your measured bandwidth (`iperf3 -c <prefill_ip> -t 10 -P 4`) and compare against measured TTFT delta.
 
-### Experiment E: Realistic throughput (lognormal ISL, same-node H100+H100)
+### NIXL baseline: direct-transfer lognormal throughput
 
 **Hardware: 2×H100 PCIe (81 GB VRAM each), same-node**
 **NIXL transport: POSIX shared memory (SHM) — no UCX TCP**
 **Image:** Dynamo vLLM runtime image built from the tested source revision
 
-Experiments A/B measured TTFT at fixed ISLs with `max_tokens=1`, which isolates the prefill+transfer path but doesn't capture realistic serving load. This experiment runs a sustained throughput benchmark with a lognormal ISL distribution matching real-world request patterns.
+Experiments A/B measured TTFT at fixed ISLs with `max_tokens=1`, which isolates the prefill+transfer path but doesn't capture realistic serving load. This baseline runs a sustained throughput benchmark with a lognormal ISL distribution matching real-world request patterns.
 
 **Why same-node instead of cross-cluster**: A cross-cluster attempt (A10 prefill → H100 decode) was blocked by a UCX TCP bug in Docker containers — see `nixlUcxSharedThread` in Troubleshooting. Same-node NIXL uses POSIX SHM, bypassing UCX TCP entirely and giving clean, reproducible results. The cross-cluster TTFT data is in Experiments A/B.
 
@@ -198,7 +202,7 @@ Experiments A/B measured TTFT at fixed ISLs with `max_tokens=1`, which isolates 
 | Inter-token latency | **10.95ms** (std=0.02ms — very tight) |
 | Success rate | **200/200** |
 
-**Relation to Experiments A/B/C**: Exp C measured same-node throughput at fixed ISL=2048 (2.361 req/s, N=100). Exp E extends this with a lognormal ISL distribution and 2× more requests for tighter confidence intervals.
+**Relation to Experiments A/B/C**: Exp C measured same-node throughput at fixed ISL=2048 (2.361 req/s, N=100). This baseline extends that with a lognormal ISL distribution and 2× more requests for tighter confidence intervals. It is not the final same-node leg for Experiment E because Experiment E is intended to compare KVBM/P2P deployments.
 
 To reproduce, launch a same-node prefill/decode pair using the same topology as Experiment C, then run the AIPerf workload with the parameters above:
 
@@ -210,17 +214,22 @@ To reproduce, launch a same-node prefill/decode pair using the same topology as 
 aiperf profile run ...
 ```
 
-### Experiment F: Cross-cluster KVBM lognormal (H100 prefill + hub ↔ H100 decode)
+### Experiment E: KVBM/P2P same-node vs cross-datacenter AIPerf comparison
 
-**Hardware:** H100 prefill worker + KVBM hub on one cluster; H100 decode worker on a second cluster (cross-datacenter link, ~34ms RTT measured in Experiment B)
-**Stack:** KVBM v2 (`DynamoConnector`), `kvbm_hub`, and cross-cluster transfer (not same-node POSIX SHM)
+**Goal:** run the same model and AIPerf workload through the KVBM P2P/RDMA-pull path in two deployments:
+
+1. same-node prefill/decode, to measure KVBM/P2P overhead without WAN distance
+2. different-datacenter prefill/decode, to measure the incremental cost of cross-datacenter deployment
+
+**Cross-datacenter hardware:** H100 prefill worker + KVBM hub on one cluster; H100 decode worker on a second cluster (cross-datacenter link, ~34ms RTT measured in Experiment B)
+**Stack:** KVBM v2 (`DynamoConnector`), `kvbm_hub`, and P2P/RDMA-pull cross-cluster transfer (not same-node POSIX SHM)
 **Image:** Dynamo vLLM image that includes the KVBM v2 `RustScheduler` fix
 
-This is the realistic cross-datacenter serving shape: lognormal ISL under load, not the fixed-ISL TTFT sweeps in Experiments A/B.
+This is the realistic serving comparison: same model, same AIPerf load, KVBM/P2P path, with topology as the variable.
 
 **Distribution:** lognormal(μ=7, σ=1.5) median ~1101 tokens (AIPerf `--isl 1101` or custom JSONL via `KVBM_BENCH_INPUT_FILE`), OSL=256, N=200, c=8.
 
-**Measured results** (2026-05-19, DeepSeek-R1-Distill-Llama-8B or Qwen3-8B class model, 393s benchmark):
+**Completed cross-datacenter result** (2026-05-19, DeepSeek-R1-Distill-Llama-8B or Qwen3-8B class model, 393s benchmark):
 
 | Metric | Value |
 |--------|-------|
@@ -240,7 +249,9 @@ This is the realistic cross-datacenter serving shape: lognormal ISL under load, 
 | G1→G2 offload watchdog (`wait_secs=10`) on H100 prefill | **0 watchdog fires** on H100 (unlike A10 runs where this dominated) |
 | Decode slowness | ITL ~1.9ms — decode is fast once tokens arrive |
 
-**Open question:** The ~15s TTFT is **~67×** same-node aggregated KVBM bench (~223ms) and **~6×** Experiment E same-node lognormal TTFT p50 (2.4s). The bottleneck is in the **cross-cluster KVBM dispatch pipeline** (hub/connector coordination or prefill queueing at c=8), not raw network transfer.
+**Current gap:** the matching same-node KVBM/P2P AIPerf run is still needed. The earlier 1.53 req/s same-node result is a useful direct-`NixlConnector` baseline, but it is not an apples-to-apples KVBM/P2P comparison.
+
+**Open question:** The ~15s TTFT is **~67×** a short-prompt same-node aggregated KVBM bench (~223ms) and **~6×** the direct-`NixlConnector` same-node lognormal TTFT p50 (2.4s). The bottleneck is in the **cross-cluster KVBM/P2P dispatch pipeline** (peer transfer, hub/connector coordination, or prefill queueing at c=8), not raw network transfer.
 
 **Recommended decomposition runs:**
 
@@ -248,8 +259,8 @@ KVBM v2 uses `block_size=16`; the Rust scheduler needs **≥2 G1 blocks** (ISL�
 
 1. Fixed-ISL TTFT sweep: ISL=1101, OSL=32 (2 blocks), `c=1`, N=20 — isolate per-request pipeline without queue overlap
 2. Same with `c=8` — separate queueing from per-request cost
-3. `disagg_multi_cluster_benchmark.py` with `--min-blocks 2` (default) for fixed-ISL TTFT sweeps
-4. Compare same-node `lognormal-bench.sh` vs cross-cluster setup
+3. `prefill-as-a-service/ttft_sweep.py` with KVBM/P2P launch helpers for fixed-ISL TTFT sweeps
+4. Run the same AIPerf profile on same-node KVBM/P2P and compare against the cross-datacenter result
 
 ## Prerequisites
 
@@ -291,7 +302,7 @@ export NATS_SERVER=nats://<infra_ip>:4222
 export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname -I | awk '{print $1}')
 export MODEL=deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
-./examples/backends/vllm/launch/disagg_multi_cluster_prefill.sh
+./examples/backends/vllm/launch/prefill-as-a-service/nixl_prefill_worker.sh
 ```
 
 ### Step 2: Start decode + frontend (on decode cluster)
@@ -302,7 +313,7 @@ export NATS_SERVER=nats://<infra_ip>:4222
 export MODEL=deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 export DECODE_GPUS=0,1  # multiple decode workers
 
-./examples/backends/vllm/launch/disagg_multi_cluster_decode.sh
+./examples/backends/vllm/launch/prefill-as-a-service/nixl_decode_frontend.sh
 ```
 
 ### Step 3: Test
@@ -479,7 +490,7 @@ Exception: No POSIX plugin found
 
 ```bash
 srun --jobid=$JOBID --overlap --container-name=my-session \
-  bash -c "source env.sh && ./examples/backends/vllm/launch/disagg_multi_cluster_prefill.sh"
+  bash -c "source env.sh && ./examples/backends/vllm/launch/prefill-as-a-service/nixl_prefill_worker.sh"
 ```
 
 This is only relevant when using KVBM disagg (PR #9393). Standard vLLM disagg (`NixlConnector`) handles transport differently and works in Docker.
@@ -491,7 +502,7 @@ Two workers loading the model from NFS simultaneously can race on config file lo
 
 **Setup**: NixlConnector disaggregated path on 2×A100-PCIE-80GB, same physical node. GPU 0 = prefill worker, GPU 1 = decode worker + frontend. UCX transport auto-detected (no TCP override — see Troubleshooting: same-node UCX TCP override causes segfault via CUDA IPC conflict). N=100, concurrency=8, ISL≈2016 tokens, OSL=256.
 
-> **Limitation**: Both workers run on the same physical node with UCX loopback. This isolates the disaggregation coordination overhead (prefill router dispatch + NIXL KV transfer) from genuine cross-cluster network cost. For true cross-cluster overhead, see Experiment B (TTFT-only) and Experiment F (KVBM under load).
+> **Limitation**: Both workers run on the same physical node with UCX loopback. This isolates the disaggregation coordination overhead (prefill router dispatch + NIXL KV transfer) from genuine cross-cluster network cost. For true cross-cluster overhead, see Experiment B (TTFT-only) and Experiment E (KVBM/P2P under load).
 
 **Headline result**: Disaggregation adds **+66ms to median latency** and **+28% to tail latency** (P95) versus a single-worker baseline on the same hardware.
 
@@ -513,11 +524,11 @@ For reference: KV size at ISL=2016 tokens for Qwen3-8B (32 layers, 8 GQA heads, 
 **Reproducing this benchmark:**
 ```bash
 # Disagg launch:
-./examples/backends/vllm/launch/disagg_multi_cluster_prefill.sh
-./examples/backends/vllm/launch/disagg_multi_cluster_decode.sh
+./examples/backends/vllm/launch/prefill-as-a-service/nixl_prefill_worker.sh
+./examples/backends/vllm/launch/prefill-as-a-service/nixl_decode_frontend.sh
 
 # Or run bench manually against a running endpoint:
-python3 examples/backends/vllm/launch/disagg_multi_cluster_benchmark.py
+python3 examples/backends/vllm/launch/prefill-as-a-service/ttft_sweep.py
 
 # Baseline single-worker:
 python3 benchmarks/benchmark_serving.py ...
@@ -527,7 +538,7 @@ python3 benchmarks/benchmark_serving.py ...
 
 **Goal**: KVBM v2 conditional disagg (`DynamoConnector`) on a 2×GPU same-node setup, Qwen3-8B BF16, host CPU KV cache (POSIX shared memory).
 
-**Status:** this earlier bringup validated the short-prompt KVBM path at ISL=12 tokens. For the current ≥2-block cross-cluster KVBM path, use a build that includes the RustScheduler fix and see Experiment F.
+**Status:** this earlier bringup validated the short-prompt KVBM path at ISL=12 tokens. For the current ≥2-block cross-cluster KVBM/P2P path, use a build that includes the RustScheduler and P2P/RDMA-pull changes, then see Experiment E.
 
 ### Benchmark results (N=100, c=8, ISL=12 tokens, OSL=256)
 
@@ -573,7 +584,7 @@ Earlier KVBM v2 builds could dispatch long prompts to the hub and prefill worker
 5. Decode never sends the kick because that fallback path does not manage the handshake
 6. Hub retries the same request every 10 seconds indefinitely
 
-Use the RustScheduler-enabled KVBM build for long-prompt or cross-cluster validation. The results in Experiment F were collected with that path.
+Use the RustScheduler-enabled KVBM build with the P2P/RDMA-pull path for long-prompt or cross-cluster validation. The cross-datacenter results in Experiment E were collected with that path.
 
 ### Hard-won bringup notes (preserved for when scheduler is ported)
 
@@ -588,5 +599,5 @@ Use the RustScheduler-enabled KVBM build for long-prompt or cross-cluster valida
 
 - [Disaggregated Serving design doc](../../../docs/design-docs/disagg-serving.md)
 - [Single-cluster disagg example](disagg.sh)
-- [ISL benchmark script](disagg_multi_cluster_benchmark.py) — reproduce the ISL sweep from this guide
+- [Prefill as a Service scripts](../../../examples/backends/vllm/launch/prefill-as-a-service/README.md) — launch and benchmark helpers for the scenarios in this guide
 - [PrfaaS-PD paper](https://arxiv.org/abs/2604.15039) — Qin et al. (Moonshot AI + Tsinghua, 2026)
