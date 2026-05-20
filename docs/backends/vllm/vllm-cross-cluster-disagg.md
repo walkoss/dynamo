@@ -78,16 +78,44 @@ The PrfaaS-PD paper (Qin et al., Moonshot AI + Tsinghua, [arXiv:2604.15039](http
 
 ## Experiments
 
-This guide covers six experiments, each targeting a different question:
+The experiments are easiest to read as a progression:
 
-| Experiment | Question | Status |
-|---|---|---|
-| A | Does PrfaaS work with mismatched GPU types? | **Done** — TTFT sweep, A10→H100 NVL |
-| B | How much does network distance cost? | **Done** — TTFT vs RTT, same-fabric vs 41.5ms WAN |
-| C | What is the throughput and tail-latency overhead of disaggregation? | **Done** — N=100 c=8 bench, NixlConnector, 2×A100 same-node |
-| D | Can conditional disagg (KVBM) run end-to-end on short prompts? | **Done** — historical bringup, 4.408 req/s at ISL=12 tokens (2×H100 same-node) |
-| E | What is the throughput on a realistic lognormal request distribution? | **Done** — lognormal(μ=7, σ=1.5) ISL, N=200 c=8, 2×H100 same-node |
-| F | What happens under realistic cross-cluster KVBM load? | **Done** — lognormal ISL, N=200 c=8, H100 prefill + H100 decode over WAN |
+1. Prove the simple vLLM disaggregated path works across clusters.
+2. Isolate network-distance cost with fixed-input TTFT sweeps.
+3. Measure serving overhead under load on same-node hardware.
+4. Move to KVBM when the question changes from "can KV move?" to "can Dynamo schedule conditional, multi-tier KV movement?"
+5. Measure the current KVBM cross-cluster pipeline under realistic load.
+
+### Terminology
+
+**`NixlConnector`** is the standard vLLM disaggregated connector used by `dynamo.vllm`. It is the simplest path for proving that a prefill worker can transfer KV to a decode worker. It is useful for clean TTFT and throughput measurements because there is no KVBM hub or conditional scheduling path in the middle.
+
+**KVBM / `DynamoConnector`** is Dynamo's KV block manager path. It adds the KVBM hub, scheduler, and G1/G2/G3 cache-tier logic. Use this path when testing conditional disaggregation, multi-tier KV management, or cross-cluster transfer through Dynamo's KVBM control plane. It is more representative of the target architecture, but it has more moving parts than `NixlConnector`.
+
+**Transport** is below the connector. Cross-cluster runs use UCX TCP. Same-node runs use POSIX shared memory or UCX loopback. A connector change (`NixlConnector` vs KVBM) and a transport change (TCP vs SHM) are separate variables.
+
+### Experiment map
+
+| Exp | Connector / path | Topology | Workload | Why we ran it | Main result | Why next |
+|---|---|---|---|---|---|---|
+| A | `NixlConnector` | A10 prefill → H100 NVL decode, same-campus fabric | Fixed ISL TTFT, `max_tokens=1` | Prove heterogeneous prefill/decode works across a real inter-cluster link | 4K/8K/16K TTFT: 0.144s / 0.161s / 0.281s | Move from "does it work?" to "what does distance cost?" |
+| B | `NixlConnector` | Same hardware classes, same-fabric vs WAN | Fixed ISL TTFT, warm NIXL connection | Isolate network-distance and KV-size overhead | WAN overhead scales with KV size; effective bandwidth was ~30-40 Gbps | TTFT sweeps do not answer throughput or tail latency under load |
+| C | `NixlConnector` | 2×A100 same-node | N=100, c=8, ISL≈2016, OSL=256 | Measure disaggregation overhead without WAN variability | Median latency +66ms; tail latency +28%; throughput -3.8% | Need a more realistic ISL distribution |
+| E | `NixlConnector` | 2×H100 same-node | Lognormal ISL, N=200, c=8, OSL=256 | Measure throughput under a realistic request distribution while avoiding UCX TCP instability | 1.53 req/s, TTFT p50 2.44s, 200/200 success | The target architecture needs KVBM, not only direct vLLM KV transfer |
+| D | KVBM / `DynamoConnector` fallback path | 2×H100 same-node | Short-prompt ISL=12, N=100, c=8 | Bring up the KVBM path and validate short prompts before cross-cluster load | 4.408 req/s, 100/100 success; longer prompts needed the RustScheduler path | Use a RustScheduler-enabled build for real KVBM disaggregation |
+| F | KVBM / `DynamoConnector` + hub | H100 prefill + hub → H100 decode over WAN | Lognormal ISL, N=200, c=8, OSL=256 | Test the realistic cross-cluster KVBM shape under load | 0.509 req/s, TTFT p50 ~15s, 200/200 success | Decompose hub/connector queueing vs transfer cost |
+
+### Why the path changed
+
+Experiments A, B, C, and E intentionally use `NixlConnector`. That path answers the base serving questions with the fewest variables: can KV move across clusters, how much does network distance add, and what is the overhead under load when KVBM is not involved?
+
+Experiments D and F move to KVBM because the target architecture is not just direct point-to-point KV transfer. KVBM is the Dynamo path for conditional disaggregation and tiered KV placement. The tradeoff is that KVBM introduces hub dispatch, scheduler coordination, cache-tier state, and block-size constraints. The ~15s TTFT in Experiment F should therefore be read as a KVBM pipeline result, not as a pure WAN bandwidth result.
+
+The short version:
+
+- Use A/B to reason about raw cross-cluster feasibility and KV transfer slope.
+- Use C/E to reason about `NixlConnector` throughput without WAN noise.
+- Use D/F to reason about KVBM readiness and where its cross-cluster pipeline currently spends time.
 
 ### Experiment A: Hardware specialization (heterogeneous)
 
