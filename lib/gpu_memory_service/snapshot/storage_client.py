@@ -18,6 +18,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.vmm import VMMDeviceType
 from gpu_memory_service.snapshot.disk import (
     DeviceToFileWriter,
     load_manifest_and_metadata,
@@ -50,9 +51,11 @@ class GMSStorageClient:
         sharded_ssd_roots: Optional[Sequence[str]] = None,
         sharded_ssd_queues_per_root: int = 2,
         posix_backend_params: Optional[Mapping[str, str]] = None,
+        device_kind: VMMDeviceType = VMMDeviceType.CUDA,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
+        self._device_kind = device_kind
         self._timeout_ms = timeout_ms
         self._shard_size = shard_size_bytes
         self._transfer_backend = transfer_backend
@@ -86,7 +89,9 @@ class GMSStorageClient:
             )
         output_dir, shard_dirs, use_absolute_shard_paths = self._prepare_output_dir()
 
-        mm = GMSClientMemoryManager(self._socket_path, device=self.device)
+        mm = GMSClientMemoryManager(
+            self._socket_path, device=self.device, device_kind=self._device_kind
+        )
         try:
             mm.connect(RequestedLockType.RO, timeout_ms=self._timeout_ms)
             layout_hash = mm.get_memory_layout_hash()
