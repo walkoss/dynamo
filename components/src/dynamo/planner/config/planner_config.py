@@ -403,8 +403,9 @@ class PlannerConfig(BaseModel):
         default=8080,
         description=(
             "Port for the live diagnostics dashboard HTTP server. "
-            "Set to 0 to disable. When enabled, visit http://host:port/ "
-            "to view a real-time Plotly report of accumulated snapshots."
+            "Set to 0 to disable. When enabled, visit "
+            "http://<host>:<port>/ to view a real-time Plotly report of "
+            "accumulated snapshots."
         ),
     )
 
