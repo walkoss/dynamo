@@ -392,9 +392,29 @@ class DcgmActuator:
         would mask a misconfiguration. The chart catches typos at
         template time (via `validateActuator`); this method catches
         runtime unreachability with a clear stack trace.
+
+        Fails fast on DCGM 3.x bindings: `_apply_cap_inner` uses
+        `dcgm_structs.c_dcgmDeviceConfig_v2`, which only exists in 4.x.
+        Without the check below, the agent would connect cleanly, run
+        one reconcile tick worth of cap-writes (raising `AttributeError`
+        on the first GPU), and exit mid-tick — leaving some GPUs capped
+        and SIGTERM-restore unable to run because the actuator never
+        finished registering. Failing here surfaces the version skew
+        as an actionable startup error instead.
         """
         import dcgm_structs
         import pydcgm
+
+        if not hasattr(dcgm_structs, "c_dcgmDeviceConfig_v2"):
+            raise RuntimeError(
+                "DcgmActuator requires DCGM >= 4.0 bindings "
+                "(dcgm_structs.c_dcgmDeviceConfig_v2 is missing — "
+                "DCGM 3.x bindings detected). Rebuild the Power Agent "
+                "image against a DCGM 4.x base via "
+                "`--build-arg DCGM_IMAGE=nvcr.io/nvidia/cloud-native/"
+                "dcgm:4.5.1-1-ubuntu22.04` (or newer 4.x tag); see "
+                "components/power_agent/Dockerfile."
+            )
 
         self._handle = pydcgm.DcgmHandle(
             ipAddress=f"{self._host}:{self._port}",

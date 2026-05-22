@@ -305,6 +305,37 @@ class TestInit(unittest.TestCase):
             actuator.init()
         self.assertEqual(actuator._discovered_gpu_ids, [0, 1, 2, 3])
 
+    def test_init_rejects_dcgm_3x_bindings_with_actionable_error(self):
+        """`_apply_cap_inner` uses `dcgm_structs.c_dcgmDeviceConfig_v2`,
+        which only exists in DCGM 4.x. With 3.x bindings the agent
+        would connect cleanly, run one reconcile tick worth of cap
+        writes (raising AttributeError on the first GPU), and exit
+        mid-tick — leaving some GPUs capped and the SIGTERM-restore
+        path unable to run because the actuator never finished
+        registering. init() must fail BEFORE opening the hostengine
+        connection with a message that names the missing struct and
+        points at the Dockerfile fix.
+        """
+        modules = _make_dcgm_modules()
+        # Simulate 3.x bindings by deleting the 4.x-only struct from the
+        # mocked module surface — MagicMock's `del` semantics flip
+        # subsequent `hasattr(...)` to False, exactly what the guard
+        # in `DcgmActuator.init` checks.
+        del modules["dcgm_structs"].c_dcgmDeviceConfig_v2
+        _wire_handle(modules["pydcgm"], gpu_ids=(0,))
+        actuator = DcgmActuator(host="hostengine.example", port=5555)
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator.init()
+        msg = str(ctx.exception)
+        self.assertIn("DCGM >= 4.0", msg)
+        self.assertIn("c_dcgmDeviceConfig_v2", msg)
+        self.assertIn("DCGM_IMAGE", msg)
+        # Guard must fail BEFORE any pydcgm calls so misconfigured
+        # deployments don't half-init and leave hostengine sockets
+        # dangling. DcgmHandle is the first pydcgm-touching call.
+        modules["pydcgm"].DcgmHandle.assert_not_called()
+
 
 class TestShutdown(unittest.TestCase):
     def test_shutdown_releases_groups_handle_and_nvml(self):
