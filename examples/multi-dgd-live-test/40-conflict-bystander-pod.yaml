@@ -1,28 +1,47 @@
-# ---------------------------------------------------------------------
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Multi-pod conflict bystander pod (§8.5.7).
 #
-# Schedules itself onto any one of the 8 GPUs on $TEST_NODE via the
-# NVIDIA device plugin's `nvidia.com/gpu: 1` resource claim and
-# annotates itself with a power-limit value that conflicts with
-# whatever the worker pods on that GPU asked for. The Power Agent
-# should detect the conflict, increment its `multi_pod_gpu_total`
-# (disposition=conflict) counter, apply safe-default on the assigned
-# GPU only, and leave the other 7 untouched.
+# Sneaks onto the same GPU as one of the worker pods (without
+# consuming any device-plugin capacity) and carries an annotation
+# value that conflicts with whatever the worker on that GPU already
+# requested. The Power Agent should detect the conflict, increment
+# its `multi_pod_gpu_total` (disposition=conflict) counter, apply
+# safe-default on the affected GPU only, and leave the other 7
+# untouched.
 #
-# Historical note: a previous revision pinned this pod to a specific
-# GPU UUID via `NVIDIA_VISIBLE_DEVICES=GPU-<uuid>`. AKS clusters in
-# CDI device mode (the dpp-dev-env default) reject that with
-#   `unresolvable CDI devices management.nvidia.com/gpu=GPU-<uuid>`
-# and refuse to admit the pod. The resource-claim approach below is
-# CDI-mode-agnostic — the device plugin negotiates assignment using
-# its own machinery — and the live test discovers which GPU got the
-# bystander at runtime by intersecting NVML compute-running PIDs
-# across all 8 GPUs.
+# Scheduling subtlety (PR #9683 review feedback). Two non-options
+# this manifest deliberately avoids:
 #
-# Tracked as PR #9683 Finding #7. Test class:
-# `components/src/dynamo/planner/tests/integration/test_multi_dgd_live.py`
-# ::TestMultiPodConflict.
-# ---------------------------------------------------------------------
+#   1. `NVIDIA_VISIBLE_DEVICES=<uuid>` / `<index>` — AKS in CDI device
+#      mode (dpp-dev-env default) rejects both with
+#      `unresolvable CDI devices management.nvidia.com/gpu=*` and
+#      refuses to admit the pod. See `50-stub-workers.yaml` lines
+#      11-16 for the same constraint described from the worker side.
+#
+#   2. `resources.requests.nvidia.com/gpu: 1` — would correctly route
+#      a GPU under CDI, but the 5 stub workers already claim all 8
+#      GPUs on the test node (1+1+2+2+2 = 8). A device-plugin claim
+#      from this pod would sit Pending forever and the conflict would
+#      never materialise.
+#
+# The CDI-safe + zero-scheduler-impact option is the same pattern the
+# Power Agent itself uses (deploy/helm/charts/power-agent/values.yaml):
+#   - `NVIDIA_VISIBLE_DEVICES: "all"` exposes every GPU to the
+#     container without consuming a device-plugin claim,
+#   - `runtimeClassName: nvidia` lets the toolkit inject NVML +
+#     libcuda the usual way,
+#   - the in-pod Python pins itself to `cuda:0` (the first visible
+#     device — same NVML enumeration order as the agent, since both
+#     pods have `NVIDIA_VISIBLE_DEVICES: "all"`).
+#
+# The Python test (test_multi_dgd_live.py::TestMultiPodConflict) then
+# discovers WHICH physical GPU the bystander's compute context landed
+# on by polling `nvmlDeviceGetComputeRunningProcesses` across all 8
+# GPUs from the power-agent pod and watching for a new PID — same
+# robust discovery loop regardless of which GPU index this turns out
+# to be. Tracked as PR #9683 Finding #7.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -51,20 +70,20 @@ spec:
       image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
       imagePullPolicy: IfNotPresent
       env:
-        # NVIDIA_DRIVER_CAPABILITIES still required so the toolkit
-        # injects libnvidia-ml.so etc.; the device plugin owns the
-        # actual GPU-id wiring via the resource claim above.
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
         - name: NVIDIA_DRIVER_CAPABILITIES
           value: "compute,utility"
       resources:
+        # NO `nvidia.com/gpu` claim here. See top-of-file comment;
+        # the stub workers already claim every device-plugin GPU
+        # on the test node.
         requests:
           cpu: "200m"
           memory: "1Gi"
-          nvidia.com/gpu: 1
         limits:
           cpu: "1"
           memory: "2Gi"
-          nvidia.com/gpu: 1
       command: ["python3", "-c"]
       args:
         - |

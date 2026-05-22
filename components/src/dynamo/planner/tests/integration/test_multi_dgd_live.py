@@ -976,28 +976,44 @@ class TestCapApplicationProof:
 
 
 class TestMultiPodConflict:
-    """Deliberate misconfig: a bystander pod claims one GPU (whichever
-    the device plugin hands it) with a power-limit value that disagrees
-    with whatever worker pod already shares that GPU. Power Agent must
-    detect the disagreement, increment its multi_pod_gpu_total /
-    safe_default_applied_total counters, apply safe-default on the
-    *assigned* GPU only, and leave the other 7 GPUs alone.
+    """Deliberate misconfig: a bystander pod sneaks onto one GPU
+    (whichever the toolkit lets it see as ``cuda:0``) with a
+    power-limit value that disagrees with whatever worker pod already
+    shares that GPU. Power Agent must detect the disagreement,
+    increment its multi_pod_gpu_total / safe_default_applied_total
+    counters, apply safe-default on the *assigned* GPU only, and
+    leave the other 7 GPUs alone.
 
-    Historical note (PR #9683 Finding #7): the earlier implementation
-    pinned the bystander to a specific GPU UUID via
-    ``NVIDIA_VISIBLE_DEVICES=<uuid>``. AKS in CDI device mode rejects
-    that with ``unresolvable CDI devices management.nvidia.com/gpu=*``
-    and refuses to admit the pod. The CDI-safe path used here is:
+    Historical note (PR #9683 Finding #7) — two non-options:
 
-      1. Bystander pod claims ``nvidia.com/gpu: 1`` from the device
-         plugin — CDI-mode-agnostic, the plugin owns assignment.
-      2. After the bystander reaches Running and creates a CUDA
-         context, we discover *which* GPU index the device plugin
-         picked by intersecting NVML compute-running PIDs across all
-         8 GPUs (the agent pod has hostPID + NVML access, so it sees
-         the full picture).
-      3. All blast-radius asserts then key off the discovered index,
-         not a hard-coded `0`.
+      1. ``NVIDIA_VISIBLE_DEVICES=<uuid>`` / ``<index>``. AKS in CDI
+         device mode (dpp-dev-env default) rejects both with
+         ``unresolvable CDI devices management.nvidia.com/gpu=*`` and
+         refuses to admit the pod.
+
+      2. ``resources.requests.nvidia.com/gpu: 1``. CDI-mode-safe, but
+         the five stub workers in ``50-stub-workers.yaml`` already
+         claim every device-plugin GPU on the test node
+         (1+1+2+2+2 = 8). A device-plugin claim from the bystander
+         sits Pending and the conflict never materialises.
+
+    The CDI-safe + zero-scheduler-impact path used here mirrors the
+    Power Agent's own pod spec (deploy/helm/charts/power-agent/
+    values.yaml): ``NVIDIA_VISIBLE_DEVICES: "all"`` exposes every
+    GPU through the toolkit without a device-plugin claim, and the
+    bystander pins itself to ``cuda:0`` (the first visible device).
+    The agent and bystander share the same NVML enumeration order
+    because both have ``NVIDIA_VISIBLE_DEVICES: "all"``, so ``cuda:0``
+    in the bystander is the same physical GPU as index 0 in the
+    agent's NVML view — and the discovery loop below confirms this
+    by PID rather than trusting the mapping.
+
+    Discovery: after the bystander reaches Running and creates a
+    CUDA context, we discover *which* physical GPU index the
+    ``cuda:0`` mapping resolved to by intersecting NVML
+    compute-running PIDs across all 8 GPUs (the agent pod has hostPID
+    + NVML, so it sees the full picture). All blast-radius asserts
+    then key off the discovered index rather than a hard-coded 0.
 
     The bystander MUST create a CUDA compute context (a Python that
     just imports torch isn't enough) because
@@ -1043,9 +1059,15 @@ class TestMultiPodConflict:
             "    x.add_(1)\n"
             "    time.sleep(0.1)\n"
         )
-        # CDI-safe: no NVIDIA_VISIBLE_DEVICES. The device plugin's
-        # `nvidia.com/gpu: 1` claim drives assignment, and CDI mode
-        # negotiates the actual device wiring transparently.
+        # CDI-safe and scheduler-neutral: `NVIDIA_VISIBLE_DEVICES=all`
+        # (the same value the Power Agent uses, see
+        # `deploy/helm/charts/power-agent/values.yaml`) exposes every
+        # GPU to the container without a device-plugin claim. The five
+        # stub workers in 50-stub-workers.yaml have already claimed
+        # all 8 `nvidia.com/gpu` slots; any claim from this pod would
+        # sit Pending. The CUDA runtime picks `cuda:0` deterministically,
+        # which maps to physical index 0 (same enumeration as the agent
+        # since both have `NVIDIA_VISIBLE_DEVICES=all`).
         bystander_manifest = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -1079,21 +1101,19 @@ class TestMultiPodConflict:
                         "args": [bystander_script],
                         "env": [
                             {
+                                "name": "NVIDIA_VISIBLE_DEVICES",
+                                "value": "all",
+                            },
+                            {
                                 "name": "NVIDIA_DRIVER_CAPABILITIES",
                                 "value": "compute,utility",
                             },
                         ],
                         "resources": {
-                            "requests": {
-                                "cpu": "200m",
-                                "memory": "1Gi",
-                                "nvidia.com/gpu": 1,
-                            },
-                            "limits": {
-                                "cpu": "1",
-                                "memory": "2Gi",
-                                "nvidia.com/gpu": 1,
-                            },
+                            # No `nvidia.com/gpu` claim — see comment
+                            # above bystander_manifest.
+                            "requests": {"cpu": "200m", "memory": "1Gi"},
+                            "limits": {"cpu": "1", "memory": "2Gi"},
                         },
                     }
                 ],
@@ -1150,15 +1170,20 @@ class TestMultiPodConflict:
             else:
                 pytest.fail("Bystander pod never reached Running state")
 
-            # Discover which GPU index the device plugin assigned by
-            # polling per-GPU PIDs and detecting the first index that
-            # gained a PID not present in the baseline. Wait up to 90 s
-            # (the torch.cuda.init() inside vllm-runtime is slow on a
+            # Discover which physical GPU the bystander's `cuda:0`
+            # context landed on by polling per-GPU PIDs and detecting
+            # the first index that gained a PID not present in the
+            # baseline. Expected to be index 0 since both pods see
+            # `NVIDIA_VISIBLE_DEVICES=all`, but we discover via PID
+            # rather than trusting the mapping so the test stays
+            # robust under any future toolkit / CDI change that
+            # reorders devices. Wait up to 90 s (the
+            # `torch.cuda.init()` inside vllm-runtime is slow on a
             # cold pod).
             assigned_gpu: int = -1
             for _ in range(30):
                 current_per_gpu = _per_gpu_compute_pids()
-                # An assignment shows up as a new PID on exactly one GPU.
+                # The CUDA context shows up as a new PID on exactly one GPU.
                 for idx, pids in current_per_gpu.items():
                     new = pids - baseline_per_gpu_pids.get(idx, set())
                     if new:
@@ -1173,8 +1198,8 @@ class TestMultiPodConflict:
                     "the bystander reaching Running. Either the torch "
                     "script crashed (check `kubectl logs "
                     f"power-conflict-bystander -n {_NAMESPACE}`), or the "
-                    "device-plugin claim didn't actually route a GPU to "
-                    "the pod. baseline="
+                    "`NVIDIA_VISIBLE_DEVICES=all` env didn't actually "
+                    "expose any GPU to the pod. baseline="
                     f"{ {k: sorted(v) for k, v in baseline_per_gpu_pids.items()} }, "
                     "current="
                     f"{ {k: sorted(v) for k, v in _per_gpu_compute_pids().items()} }"
@@ -1205,8 +1230,8 @@ class TestMultiPodConflict:
             # every OTHER GPU still carries its pre-conflict cap.
             observed = _read_nvml_caps_via_pod(core_api, power_agent_pod_name)
             assert observed[assigned_gpu] == _SAFE_DEFAULT_WATTS, (
-                f"GPU {assigned_gpu} (the device-plugin's assignment for the "
-                f"bystander) should be at safe-default {_SAFE_DEFAULT_WATTS} W "
+                f"GPU {assigned_gpu} (the bystander's `cuda:0` mapping) "
+                f"should be at safe-default {_SAFE_DEFAULT_WATTS} W "
                 f"during conflict, got {observed[assigned_gpu]} W"
             )
             for idx in range(8):
