@@ -21,3 +21,16 @@
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
+
+# Kubernetes cluster-internal DNS — `*.svc.cluster.local` is only
+# resolvable from inside the cluster. Used in planner defaults
+# (e.g. the in-cluster Prometheus endpoint in `defaults.py` and
+# `planner_config.py`).
+\.svc\.cluster\.local
+
+# Documentation placeholders for "fill in your real host/port".
+# Appear in planner config docstrings and the auto-generated platform
+# Helm chart README (`Format: "http://hostname:port"` etc.).
+^https?://hostname:port/?$
+^nats://hostname:port/?$
+^https?://host:port/?$
