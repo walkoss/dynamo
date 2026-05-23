@@ -97,6 +97,12 @@ pub enum FindBestMatchOutcome {
         overlap_blocks: u32,
         effective_overlap_blocks: f64,
         cached_tokens: usize,
+        selected_decode_blocks: usize,
+        selected_prefill_tokens: usize,
+        pending_count_at_admit: usize,
+        pending_isl_tokens_at_admit: usize,
+        queue_delay_ms: f64,
+        queued: bool,
     },
     Backpressure {
         reason: RouterBackpressureReason,
@@ -754,6 +760,12 @@ where
             overlap_blocks: response.effective_overlap_blocks.round() as u32,
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
+            selected_decode_blocks: response.selected_decode_blocks,
+            selected_prefill_tokens: response.selected_prefill_tokens,
+            pending_count_at_admit: response.pending_count_at_admit,
+            pending_isl_tokens_at_admit: response.pending_isl_tokens_at_admit,
+            queue_delay_ms: response.queue_delay_ms,
+            queued: response.queued,
         })
     }
 
@@ -1227,6 +1239,12 @@ where
                         worker,
                         overlap_blocks,
                         cached_tokens,
+                        selected_decode_blocks,
+                        selected_prefill_tokens,
+                        pending_count_at_admit,
+                        pending_isl_tokens_at_admit,
+                        queue_delay_ms,
+                        queued,
                         ..
                     }) => {
                         if request_trace_enabled() {
@@ -1239,6 +1257,12 @@ where
                                 "prompt_tokens": tokens.len(),
                                 "cached_tokens": cached_tokens,
                                 "overlap_blocks": overlap_blocks,
+                                "selected_decode_blocks": selected_decode_blocks,
+                                "selected_prefill_tokens": selected_prefill_tokens,
+                                "pending_count_at_admit": pending_count_at_admit,
+                                "pending_isl_tokens_at_admit": pending_isl_tokens_at_admit,
+                                "scheduler_queue_delay_ms": queue_delay_ms,
+                                "queued_before_admit": queued,
                             });
                             tracing::info!(
                                 target: "dynamo_request_trace",

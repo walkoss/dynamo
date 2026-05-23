@@ -251,6 +251,7 @@ where
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
+            queued_at: None,
             resp_tx: Some(resp_tx),
         };
 

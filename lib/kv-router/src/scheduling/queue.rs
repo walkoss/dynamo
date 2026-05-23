@@ -336,6 +336,7 @@ impl<
             }
             tracing::debug!("all workers prefill-busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
+            request.queued_at = Some(Instant::now());
             let key = {
                 let workers = self.workers_with_configs.borrow();
                 self.policy
@@ -438,11 +439,34 @@ impl<
                 return;
             }
         };
+        let selected_decode_blocks = request
+            .decode_blocks
+            .get(&selection.worker)
+            .copied()
+            .unwrap_or(0);
+        let selected_prefill_tokens = request
+            .prefill_tokens
+            .get(&selection.worker)
+            .copied()
+            .unwrap_or(request.isl_tokens);
+        let queued_at = request.queued_at;
+        let queue_delay_ms = queued_at
+            .map(|queued_at| queued_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let queued = queued_at.is_some();
+        let pending_count_at_admit = self.pending_count.load(AtomicOrdering::Relaxed);
+        let pending_isl_tokens_at_admit = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
 
         request.respond(Ok(SchedulingResponse {
             best_worker: selection.worker,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
+            selected_decode_blocks,
+            selected_prefill_tokens,
+            pending_count_at_admit,
+            pending_isl_tokens_at_admit,
+            queue_delay_ms,
+            queued,
         }));
 
         if !request.update_states {
@@ -909,6 +933,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            queued_at: None,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -1439,6 +1464,7 @@ mod tests {
             allowed_worker_ids: Some(allowed),
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            queued_at: None,
             resp_tx: Some(tx),
         };
         queue.enqueue(req).await;

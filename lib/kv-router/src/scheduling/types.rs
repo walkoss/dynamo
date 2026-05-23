@@ -82,6 +82,12 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    pub selected_decode_blocks: usize,
+    pub selected_prefill_tokens: usize,
+    pub pending_count_at_admit: usize,
+    pub pending_isl_tokens_at_admit: usize,
+    pub queue_delay_ms: f64,
+    pub queued: bool,
 }
 
 pub struct SchedulingRequest {
@@ -112,6 +118,7 @@ pub struct SchedulingRequest {
 
     // Scheduling side effects and lifecycle controls.
     pub update_states: bool,
+    pub queued_at: Option<tokio::time::Instant>,
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 
