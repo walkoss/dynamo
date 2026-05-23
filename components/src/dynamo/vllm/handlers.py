@@ -3,6 +3,7 @@
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 
@@ -14,6 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
@@ -92,6 +94,76 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
+_REQUEST_TRACE_FILE_HANDLE: Any | None = None
+_REQUEST_TRACE_FILE_LOCK = threading.Lock()
+
+
+def _request_trace_enabled() -> bool:
+    return os.environ.get("DYN_REQUEST_TRACE_LOGGING", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _request_trace_file_path() -> Path | None:
+    explicit_path = os.environ.get("DYN_REQUEST_TRACE_FILE")
+    if explicit_path:
+        return Path(explicit_path)
+
+    log_dir = Path("/logs")
+    if log_dir.is_dir():
+        return log_dir / f"dynamo_request_trace_vllm_{os.getpid()}.jsonl"
+    return None
+
+
+def _write_request_trace_payload(payload: dict[str, Any]) -> None:
+    global _REQUEST_TRACE_FILE_HANDLE
+
+    path = _request_trace_file_path()
+    if path is None:
+        return
+
+    try:
+        line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        with _REQUEST_TRACE_FILE_LOCK:
+            if _REQUEST_TRACE_FILE_HANDLE is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _REQUEST_TRACE_FILE_HANDLE = path.open(
+                    "a", encoding="utf-8", buffering=1
+                )
+            _REQUEST_TRACE_FILE_HANDLE.write(f"{line}\n")
+    except Exception:
+        logger.debug("failed to write request trace payload", exc_info=True)
+
+
+def _log_request_trace_event(event: str, request_id: str, **fields: Any) -> None:
+    if not _request_trace_enabled():
+        return
+
+    payload = {
+        "event": event,
+        "request_id": request_id,
+        "wall_time_ns": time.time_ns(),
+        **fields,
+    }
+    logger.info(
+        "dynamo_request_trace %s",
+        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    )
+    _write_request_trace_payload(payload)
+
+
+def _prompt_token_count(prompt: Any) -> int | None:
+    token_ids = getattr(prompt, "prompt_token_ids", None)
+    if token_ids is not None:
+        return len(token_ids)
+    if isinstance(prompt, dict):
+        token_ids = prompt.get("prompt_token_ids") or prompt.get("token_ids")
+        if token_ids is not None:
+            return len(token_ids)
+    return None
 
 
 class _DeferredAbort:
@@ -2095,6 +2167,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         sampling_params,
         request_id,
         data_parallel_rank=None,
+        global_data_parallel_rank=None,
         lora_request=None,
         embedding_sequence_length=None,
         trace_headers=None,
@@ -2108,6 +2181,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "Starting token generation for request {request_id}{lora_info}",
                 request_id,
                 lora_request,
+            )
+            trace_dp_rank = (
+                global_data_parallel_rank
+                if global_data_parallel_rank is not None
+                else data_parallel_rank
+            )
+            _log_request_trace_event(
+                "backend_dp_enter",
+                request_id,
+                dp_rank=trace_dp_rank,
+                local_dp_rank=data_parallel_rank,
+                dp_start=self.dp_range[0],
+                dp_size=self.dp_range[1],
+                prompt_tokens=_prompt_token_count(prompt),
+                requested_output_tokens=getattr(sampling_params, "max_tokens", None),
+                disaggregation_mode=str(self.config.disaggregation_mode),
+                handler=type(self).__name__,
             )
             gen = self.engine_client.generate(
                 prompt,
@@ -2125,66 +2215,102 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             num_output_tokens_so_far: dict[int, int] = {}
-            async for res in gen:
-                # res is vllm's RequestOutput
-
-                if not res.outputs:
-                    self._log_with_lora_context(
-                        "Request {request_id}{lora_info} returned no outputs",
-                        request_id,
-                        lora_request,
-                    )
-                    # Use string format "error: message" for consistency with vLLM's string-based finish_reason
-                    # Rust will parse this into FinishReason::Error(message)
-                    yield {
-                        "finish_reason": "error: No outputs from vLLM engine",
-                        "index": 0,
-                        "token_ids": [],
-                    }
-                    break
-
-                for output in res.outputs:
-                    output_idx = getattr(output, "index", 0) or 0
-                    previous_total_toks = num_output_tokens_so_far.get(output_idx, 0)
-                    next_total_toks = len(output.token_ids)
-                    out = {
-                        "index": output_idx,
-                        "token_ids": output.token_ids[previous_total_toks:],
-                    }
-
-                    # Extract logprobs for new tokens if available
-                    tokenizer = getattr(self.engine_client, "tokenizer", None)
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, previous_total_toks, tokenizer=tokenizer
-                    )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
-
-                    if output.finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(
-                            output.finish_reason
+            emitted_tokens = 0
+            first_output_logged = False
+            first_token_logged = False
+            try:
+                async for res in gen:
+                    # res is vllm's RequestOutput
+                    if not first_output_logged:
+                        _log_request_trace_event(
+                            "backend_dp_first_output",
+                            request_id,
+                            dp_rank=trace_dp_rank,
+                            local_dp_rank=data_parallel_rank,
                         )
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            embedding_sequence_length=embedding_sequence_length,
-                        )
-                        # Log completion with LoRA info (debug level to avoid log spam)
+                        first_output_logged = True
+
+                    if not res.outputs:
                         self._log_with_lora_context(
-                            "Completed token generation for request {request_id}{lora_info}: "
-                            "{output_tokens} output tokens, finish_reason={finish_reason}",
+                            "Request {request_id}{lora_info} returned no outputs",
                             request_id,
                             lora_request,
-                            output_tokens=next_total_toks,
-                            finish_reason=output.finish_reason,
                         )
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
-                    yield out
-                    num_output_tokens_so_far[output_idx] = next_total_toks
+                        # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                        # Rust will parse this into FinishReason::Error(message)
+                        yield {
+                            "finish_reason": "error: No outputs from vLLM engine",
+                            "index": 0,
+                            "token_ids": [],
+                        }
+                        break
+
+                    for output in res.outputs:
+                        output_idx = getattr(output, "index", 0) or 0
+                        previous_total_toks = num_output_tokens_so_far.get(
+                            output_idx, 0
+                        )
+                        next_total_toks = len(output.token_ids)
+                        new_token_ids = output.token_ids[previous_total_toks:]
+                        emitted_tokens += len(new_token_ids)
+                        if new_token_ids and not first_token_logged:
+                            _log_request_trace_event(
+                                "backend_dp_first_token",
+                                request_id,
+                                dp_rank=trace_dp_rank,
+                                local_dp_rank=data_parallel_rank,
+                                output_index=output_idx,
+                                emitted_tokens=emitted_tokens,
+                            )
+                            first_token_logged = True
+                        out = {
+                            "index": output_idx,
+                            "token_ids": new_token_ids,
+                        }
+
+                        # Extract logprobs for new tokens if available
+                        tokenizer = getattr(self.engine_client, "tokenizer", None)
+                        log_probs, top_logprobs = self._extract_logprobs(
+                            output, previous_total_toks, tokenizer=tokenizer
+                        )
+                        if log_probs is not None:
+                            out["log_probs"] = log_probs
+                        if top_logprobs is not None:
+                            out["top_logprobs"] = top_logprobs
+
+                        if output.finish_reason:
+                            out["finish_reason"] = normalize_finish_reason(
+                                output.finish_reason
+                            )
+                            out[
+                                "completion_usage"
+                            ] = BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                                embedding_sequence_length=embedding_sequence_length,
+                            )
+                            # Log completion with LoRA info (debug level to avoid log spam)
+                            self._log_with_lora_context(
+                                "Completed token generation for request {request_id}{lora_info}: "
+                                "{output_tokens} output tokens, finish_reason={finish_reason}",
+                                request_id,
+                                lora_request,
+                                output_tokens=next_total_toks,
+                                finish_reason=output.finish_reason,
+                            )
+                        if output.stop_reason:
+                            out["stop_reason"] = output.stop_reason
+                        yield out
+                        num_output_tokens_so_far[output_idx] = next_total_toks
+            finally:
+                _log_request_trace_event(
+                    "backend_dp_done",
+                    request_id,
+                    dp_rank=trace_dp_rank,
+                    local_dp_rank=data_parallel_rank,
+                    emitted_tokens=emitted_tokens,
+                    saw_first_output=first_output_logged,
+                    saw_first_token=first_token_logged,
+                )
 
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
@@ -2396,7 +2522,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
         routing = request.get("routing") or {}
-        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        global_dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(global_dp_rank)
         priority = -int(routing.get("priority", 0))
 
         trace_headers = context.trace_headers()
@@ -2420,6 +2547,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         sampling_params,
                         request_id,
                         data_parallel_rank=dp_rank,
+                        global_data_parallel_rank=global_dp_rank,
                         lora_request=lora_request,
                         embedding_sequence_length=embedding_sequence_length,
                         trace_headers=trace_headers,
@@ -2459,15 +2587,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         routing = request.get("routing") or {}
-        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        global_dp_rank = routing.get("dp_rank")
+        dp_rank = self._to_local_dp_rank(global_dp_rank)
         priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
+        previous_token_count_per_choice: dict[int, int] = {}
 
         trace_headers = context.trace_headers()
 
         async with self._abort_monitor(context, request_id):
             try:
+                trace_dp_rank = (
+                    global_dp_rank if global_dp_rank is not None else dp_rank
+                )
+                _log_request_trace_event(
+                    "backend_dp_enter",
+                    request_id,
+                    dp_rank=trace_dp_rank,
+                    local_dp_rank=dp_rank,
+                    dp_start=self.dp_range[0],
+                    dp_size=self.dp_range[1],
+                    prompt_tokens=_prompt_token_count(prompt),
+                    requested_output_tokens=getattr(sampling_params, "max_tokens", None),
+                    disaggregation_mode=str(self.config.disaggregation_mode),
+                    handler=type(self).__name__,
+                    mode="text",
+                )
                 gen = self.engine_client.generate(
                     prompt,
                     sampling_params,
@@ -2477,55 +2623,103 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     priority=priority,
                 )
 
-                async for res in gen:
-                    if not res.outputs:
-                        yield {
-                            "id": openai_request_id,
-                            "created": int(time.time()),
-                            "object": "chat.completion.chunk",
-                            "model": "unknown",
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": ""},
-                                    "finish_reason": "error",
-                                }
-                            ],
-                        }
-                        break
-
-                    for output in res.outputs:
-                        output_idx = getattr(output, "index", 0) or 0
-                        previous_text = previous_text_per_choice.get(output_idx, "")
-                        # Calculate the delta text (new text since last chunk)
-                        delta_text = output.text[len(previous_text) :]
-
-                        choice_data = {
-                            "index": output_idx,
-                            "delta": {
-                                "role": "assistant",
-                                "content": delta_text,
-                            },
-                            "finish_reason": normalize_finish_reason(
-                                output.finish_reason
-                            ),
-                        }
-
-                        chunk = {
-                            "id": openai_request_id,
-                            "created": int(time.time()),
-                            "object": "chat.completion.chunk",
-                            "model": "unknown",
-                            "choices": [choice_data],
-                        }
-
-                        if output.finish_reason:
-                            chunk["usage"] = BaseWorkerHandler._build_completion_usage(
-                                request_output=res,
+                emitted_tokens = 0
+                first_output_logged = False
+                first_token_logged = False
+                try:
+                    async for res in gen:
+                        if not first_output_logged:
+                            _log_request_trace_event(
+                                "backend_dp_first_output",
+                                request_id,
+                                dp_rank=trace_dp_rank,
+                                local_dp_rank=dp_rank,
                             )
+                            first_output_logged = True
 
-                        yield chunk
-                        previous_text_per_choice[output_idx] = output.text
+                        if not res.outputs:
+                            yield {
+                                "id": openai_request_id,
+                                "created": int(time.time()),
+                                "object": "chat.completion.chunk",
+                                "model": "unknown",
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"role": "assistant", "content": ""},
+                                        "finish_reason": "error",
+                                    }
+                                ],
+                            }
+                            break
+
+                        for output in res.outputs:
+                            output_idx = getattr(output, "index", 0) or 0
+                            previous_text = previous_text_per_choice.get(
+                                output_idx, ""
+                            )
+                            # Calculate the delta text (new text since last chunk)
+                            delta_text = output.text[len(previous_text) :]
+                            token_ids = getattr(output, "token_ids", None) or []
+                            previous_total_toks = previous_token_count_per_choice.get(
+                                output_idx, 0
+                            )
+                            new_token_count = max(
+                                0, len(token_ids) - previous_total_toks
+                            )
+                            emitted_tokens += new_token_count
+                            if (delta_text or new_token_count) and not first_token_logged:
+                                _log_request_trace_event(
+                                    "backend_dp_first_token",
+                                    request_id,
+                                    dp_rank=trace_dp_rank,
+                                    local_dp_rank=dp_rank,
+                                    output_index=output_idx,
+                                    emitted_tokens=emitted_tokens,
+                                )
+                                first_token_logged = True
+
+                            choice_data = {
+                                "index": output_idx,
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": delta_text,
+                                },
+                                "finish_reason": normalize_finish_reason(
+                                    output.finish_reason
+                                ),
+                            }
+
+                            chunk = {
+                                "id": openai_request_id,
+                                "created": int(time.time()),
+                                "object": "chat.completion.chunk",
+                                "model": "unknown",
+                                "choices": [choice_data],
+                            }
+
+                            if output.finish_reason:
+                                chunk[
+                                    "usage"
+                                ] = BaseWorkerHandler._build_completion_usage(
+                                    request_output=res,
+                                )
+
+                            yield chunk
+                            previous_text_per_choice[output_idx] = output.text
+                            previous_token_count_per_choice[output_idx] = len(
+                                token_ids
+                            )
+                finally:
+                    _log_request_trace_event(
+                        "backend_dp_done",
+                        request_id,
+                        dp_rank=trace_dp_rank,
+                        local_dp_rank=dp_rank,
+                        emitted_tokens=emitted_tokens,
+                        saw_first_output=first_output_logged,
+                        saw_first_token=first_token_logged,
+                    )
 
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
