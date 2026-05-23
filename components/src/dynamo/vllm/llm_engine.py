@@ -13,8 +13,10 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
@@ -59,6 +61,8 @@ if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
+_REQUEST_TRACE_FILE_HANDLE: Any | None = None
+_REQUEST_TRACE_FILE_LOCK = threading.Lock()
 
 
 def _request_trace_enabled() -> bool:
@@ -68,6 +72,37 @@ def _request_trace_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def _request_trace_file_path() -> Path | None:
+    explicit_path = os.environ.get("DYN_REQUEST_TRACE_FILE")
+    if explicit_path:
+        return Path(explicit_path)
+
+    log_dir = Path("/logs")
+    if log_dir.is_dir():
+        return log_dir / f"dynamo_request_trace_vllm_{os.getpid()}.jsonl"
+    return None
+
+
+def _write_request_trace_payload(payload: dict[str, Any]) -> None:
+    global _REQUEST_TRACE_FILE_HANDLE
+
+    path = _request_trace_file_path()
+    if path is None:
+        return
+
+    try:
+        line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        with _REQUEST_TRACE_FILE_LOCK:
+            if _REQUEST_TRACE_FILE_HANDLE is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _REQUEST_TRACE_FILE_HANDLE = path.open(
+                    "a", encoding="utf-8", buffering=1
+                )
+            _REQUEST_TRACE_FILE_HANDLE.write(f"{line}\n")
+    except Exception:
+        logger.debug("failed to write request trace payload", exc_info=True)
 
 
 def _log_request_trace_event(event: str, request_id: str, **fields: Any) -> None:
@@ -84,6 +119,7 @@ def _log_request_trace_event(event: str, request_id: str, **fields: Any) -> None
         "dynamo_request_trace %s",
         json.dumps(payload, separators=(",", ":"), sort_keys=True),
     )
+    _write_request_trace_payload(payload)
 
 
 class _UnifiedStatLogger(StatLoggerBase):

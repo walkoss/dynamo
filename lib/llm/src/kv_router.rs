@@ -3,7 +3,11 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, OnceLock},
+    fs::{File, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    process,
+    sync::{Arc, Mutex, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -89,6 +93,49 @@ fn request_trace_wall_time_ns() -> u64 {
         .ok()
         .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
         .unwrap_or(0)
+}
+
+fn request_trace_file() -> Option<&'static Mutex<File>> {
+    static TRACE_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+
+    TRACE_FILE
+        .get_or_init(|| {
+            let path = match std::env::var("DYN_REQUEST_TRACE_FILE") {
+                Ok(value) if !value.is_empty() => PathBuf::from(value),
+                _ => {
+                    let log_dir = PathBuf::from("/logs");
+                    if !log_dir.is_dir() {
+                        return None;
+                    }
+                    log_dir.join(format!(
+                        "dynamo_request_trace_router_{}.jsonl",
+                        process::id()
+                    ))
+                }
+            };
+
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+                .map(Mutex::new)
+        })
+        .as_ref()
+}
+
+fn log_request_trace_payload(payload: &serde_json::Value) {
+    tracing::info!(
+        target: "dynamo_request_trace",
+        "dynamo_request_trace {}",
+        payload
+    );
+
+    if let Some(file) = request_trace_file() {
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(file, "{payload}");
+        }
+    }
 }
 
 pub enum FindBestMatchOutcome {
@@ -865,11 +912,7 @@ where
                 "expected_output_tokens": expected_output_tokens,
                 "track_prefill_tokens": track_prefill_tokens,
             });
-            tracing::info!(
-                target: "dynamo_request_trace",
-                "dynamo_request_trace {}",
-                payload
-            );
+            log_request_trace_payload(&payload);
         }
 
         if let Err(e) = self
@@ -896,11 +939,7 @@ where
                 "request_id": request_id,
                 "wall_time_ns": request_trace_wall_time_ns(),
             });
-            tracing::info!(
-                target: "dynamo_request_trace",
-                "dynamo_request_trace {}",
-                payload
-            );
+            log_request_trace_payload(&payload);
         }
         self.scheduler.mark_prefill_completed(request_id).await
     }
@@ -912,11 +951,7 @@ where
                 "request_id": request_id,
                 "wall_time_ns": request_trace_wall_time_ns(),
             });
-            tracing::info!(
-                target: "dynamo_request_trace",
-                "dynamo_request_trace {}",
-                payload
-            );
+            log_request_trace_payload(&payload);
         }
         self.scheduler.free(request_id).await
     }
@@ -1264,11 +1299,7 @@ where
                                 "scheduler_queue_delay_ms": queue_delay_ms,
                                 "queued_before_admit": queued,
                             });
-                            tracing::info!(
-                                target: "dynamo_request_trace",
-                                "dynamo_request_trace {}",
-                                payload
-                            );
+                            log_request_trace_payload(&payload);
                         }
                         RouterResponse::New {
                             worker_id: worker.worker_id,
@@ -1291,11 +1322,7 @@ where
                                 "queued_isl_tokens": queued_isl_tokens,
                                 "max_queued_isl_tokens": max_queued_isl_tokens,
                             });
-                            tracing::info!(
-                                target: "dynamo_request_trace",
-                                "dynamo_request_trace {}",
-                                payload
-                            );
+                            log_request_trace_payload(&payload);
                         }
                         RouterResponse::Backpressure {
                             reason,
