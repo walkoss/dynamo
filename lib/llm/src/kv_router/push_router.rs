@@ -332,6 +332,7 @@ impl KvPushRouter {
                         overlap_blocks,
                         effective_overlap_blocks,
                         cached_tokens,
+                        ..
                     } => (
                         worker,
                         effective_overlap_blocks,
@@ -414,6 +415,7 @@ impl KvPushRouter {
                         overlap_blocks,
                         effective_overlap_blocks,
                         cached_tokens,
+                        ..
                     } => (
                         worker,
                         effective_overlap_blocks,
