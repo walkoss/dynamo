@@ -166,13 +166,19 @@ def _load_previously_managed_gpus() -> set[str]:
         )
         return set()
 
+    # Count invalid entries directly rather than from len(set) vs
+    # len(list) (PR9790 review): the set comprehension deduplicates,
+    # so duplicate-but-valid UUIDs would inflate the false-positive
+    # "non-string entries" count. E.g. uuids=["a","a","b"] would
+    # wrongly log "1 non-string entry" when there are zero.
+    invalid_count = sum(1 for u in uuids if not isinstance(u, str))
     valid = {u for u in uuids if isinstance(u, str)}
-    if len(valid) != len(uuids):
+    if invalid_count:
         logger.warning(
             "Managed-GPU state at %s contained %d non-string entries; "
             "dropping them. Kept %d valid UUID(s).",
             _MANAGED_STATE_PATH,
-            len(uuids) - len(valid),
+            invalid_count,
             len(valid),
         )
     return valid

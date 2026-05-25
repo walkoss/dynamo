@@ -25,7 +25,7 @@ extending §4.4's helper set with `validateActuator` + `validateEnforce`.
 The §6 design decisions and the chart shape are unchanged; only the
 configuration knobs and the validator surface grew.
 
-### Revision history
+## Revision history
 
 | Rev | Date | Changes |
 |-----|------|---------|
@@ -823,38 +823,40 @@ see only the new chart commit on top.
 
 ### 5.2 Files added / removed / modified
 
-**Added (chart v1.0.0 in PR9682; refreshed to chart v1.1.0 in PR9790):**
+**Added (chart v1.0.0 in PR9682; v1.1.0 in PR9790 added DCGM actuator; v1.2.0 in PR9682 follow-up added `image.digest`):**
 
-```
+```text
 docs/design-docs/power-agent-helm-chart-plan.md             1000+   (this doc)
-deploy/helm/charts/power-agent/Chart.yaml                     40
-deploy/helm/charts/power-agent/README.md                     255
-deploy/helm/charts/power-agent/values.yaml                   195
-deploy/helm/charts/power-agent/.helmignore                    26
-deploy/helm/charts/power-agent/templates/_helpers.tpl        144
-deploy/helm/charts/power-agent/templates/NOTES.txt            48
-deploy/helm/charts/power-agent/templates/serviceaccount.yaml  19
-deploy/helm/charts/power-agent/templates/role.yaml            36
-deploy/helm/charts/power-agent/templates/rolebinding.yaml     37
-deploy/helm/charts/power-agent/templates/daemonset.yaml      117
-deploy/helm/charts/power-agent/templates/dev-pod.yaml        122
-deploy/helm/charts/power-agent/tests/validate_actuator_test.yaml  120   (v1.1.0)
-deploy/helm/charts/power-agent/tests/validate_enforce_test.yaml   128   (v1.1.0)
+deploy/helm/charts/power-agent/Chart.yaml                     ~40
+deploy/helm/charts/power-agent/README.md                     ~255
+deploy/helm/charts/power-agent/values.yaml                   ~195
+deploy/helm/charts/power-agent/.helmignore                    ~26
+deploy/helm/charts/power-agent/templates/_helpers.tpl        ~144
+deploy/helm/charts/power-agent/templates/NOTES.txt            ~48
+deploy/helm/charts/power-agent/templates/serviceaccount.yaml  ~19
+deploy/helm/charts/power-agent/templates/role.yaml            ~36
+deploy/helm/charts/power-agent/templates/rolebinding.yaml     ~37
+deploy/helm/charts/power-agent/templates/daemonset.yaml      ~117
+deploy/helm/charts/power-agent/templates/dev-pod.yaml        ~122
+deploy/helm/charts/power-agent/tests/validate_actuator_test.yaml    ~120   (v1.1.0)
+deploy/helm/charts/power-agent/tests/validate_enforce_test.yaml     ~128   (v1.1.0)
+deploy/helm/charts/power-agent/tests/validate_image_tag_test.yaml   ~250   (v1.2.0)
 ```
 
-Chart-only total: **1,287 LOC across 13 files** (7 templates + 2 helm-unittests + 4 root files).
+Chart-only layout: **14 files** (7 templates + 3 helm-unittests + 4 root files).
+LOC totals drift across reviewer cycles, so use `find deploy/helm/charts/power-agent -type f | xargs wc -l` for the live count rather than chasing this list.
 
-**Removed (-293 LOC, 3 files; PR9682 only):**
+**Removed (3 files; PR9682 only):**
 
-```
-deploy/power_agent/daemonset.yaml    -115
-deploy/power_agent/rbac.yaml          -50
-deploy/power_agent/dev-pod.yaml      -128
+```text
+deploy/power_agent/daemonset.yaml
+deploy/power_agent/rbac.yaml
+deploy/power_agent/dev-pod.yaml
 ```
 
 **Modified (PR9682):**
 
-```
+```text
 components/power_agent/README.md       (replace kubectl-apply recipe with helm-install)
 .github/filters.yaml                   (add deploy/helm/charts/power-agent/** to planner-group filter)
 ```
@@ -1148,7 +1150,7 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
 
 **Authoring:**
 
-- [ ] Author all 13 chart files following §4.1's layout (7 templates + 2 helm-unittests + 4 root files).
+- [ ] Author all 14 chart files following §4.1's layout (7 templates + 3 helm-unittests + 4 root files).
 - [ ] Cross-check every Helm value reference (`{{ .Values.xxx }}`) against the §4.2 values schema — no orphaned values, no missing defaults.
 - [ ] **Dead-knob audit (v1.2, risk register #9):** confirm every key in the chart's `values.yaml` traces to either a `{{ .Values.xxx }}` reference in `templates/*.yaml` or a CLI flag in `power_agent.py:main()`. If any key has no wiring, drop it from `values.yaml` rather than ship dead configuration surface. (Specifically: the v1.1 draft had `agent.reconcileIntervalSeconds` as such a dead knob — verify it does not reappear. Specifically for v1.1.0: `agent.actuator` traces to `--actuator`, `agent.dcgm.host` to `--dcgm-host`, `agent.dcgm.port` to `--dcgm-port`, `agent.dcgm.enforce` to `--dcgm-enforce` — all verified live in `power_agent.py:730-804`.)
 - [ ] **RBAC effective-scope audit (v1.2, helper):** confirm `templates/role.yaml` and `templates/rolebinding.yaml` reference `include "power-agent.effectiveNamespaceRestricted" .` rather than `.Values.rbac.namespaceRestricted` directly. Test `helm template --set dev.enabled=true --set dev.nodeName=foo` produces `Role` + `RoleBinding` (not `ClusterRole`).
@@ -1156,7 +1158,7 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
 - [ ] Run `helm lint` on the chart — zero errors.
 - [ ] Run the four `helm template` exercises from §5.4 (default / namespace-restricted / dev-mode / DCGM actuator) and confirm each renders to valid manifests.
 - [ ] Run the four negative-path `helm template` exercises (missing image tag, mutex violation, invalid actuator, invalid enforce) and confirm all four fail with the §4.4 helper messages.
-- [ ] Run `helm unittest deploy/helm/charts/power-agent` — expect `24 passed, 0 failed` on the v1.1.0 chart.
+- [ ] Run `helm unittest deploy/helm/charts/power-agent` — expect `46 passed, 0 failed` on the v1.2.0 chart (24 for the v1.1.0 actuator/enforce validators + 22 added in v1.2.0 by `validate_image_tag_test.yaml`). Run again whenever the test files change to refresh the expected number rather than hardcoding it across the doc.
 
 **Doc touch-up:**
 

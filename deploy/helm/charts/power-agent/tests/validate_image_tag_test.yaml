@@ -84,18 +84,41 @@ tests:
       # rendered the raw value, so `--set-string 'image.tag= v1.1.0 '`
       # produced `repo: v1.1.0 ` — an invalid image reference. PR9682
       # follow-up: reject whitespace anywhere rather than silently
-      # normalizing it.
+      # normalizing it. PR9790 follow-up: regexMatch \s catches any
+      # whitespace, including internal — covered by dedicated cases
+      # below.
       image.tag: " v1.1.0"
     asserts:
       - failedTemplate:
-          errorPattern: "leading/trailing whitespace"
+          errorPattern: "contains whitespace"
 
   - it: should reject image.tag with trailing whitespace
     set:
       image.tag: "v1.1.0 "
     asserts:
       - failedTemplate:
-          errorPattern: "leading/trailing whitespace"
+          errorPattern: "contains whitespace"
+
+  - it: should reject image.tag with internal whitespace (PR9790 follow-up)
+    set:
+      # Pre-fix `ne $tag (trim $tag)` only caught edge whitespace.
+      # An internally-spaced value like `v1 .1.0` (copy/paste typo
+      # or YAML-quoted input) slipped through and rendered an
+      # invalid OCI image reference at runtime, deferring failure
+      # from template time to kubelet pull time. The strict regex
+      # variant catches it at install time with a clear message.
+      image.tag: "v1 .1.0"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject image.tag with an embedded tab character
+    set:
+      # Tab is whitespace too; `\s` covers space / tab / newline.
+      image.tag: "v1.1.0\textra"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
 
   - it: should reject image.tag=' latest ' on the whitespace check (fails first)
     set:
@@ -105,7 +128,7 @@ tests:
       image.tag: " latest "
     asserts:
       - failedTemplate:
-          errorPattern: "leading/trailing whitespace"
+          errorPattern: "contains whitespace"
 
   - it: should reject both image.tag and image.digest set simultaneously
     set:
@@ -195,7 +218,19 @@ tests:
       image.digest: " sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890 "
     asserts:
       - failedTemplate:
-          errorPattern: "leading/trailing whitespace"
+          errorPattern: "contains whitespace"
+
+  - it: should reject digest values with internal whitespace (PR9790 follow-up)
+    set:
+      # The strict sha256 regex below would reject this too (a space
+      # is not a hex char), but the dedicated whitespace check fires
+      # first and gives the operator a clearer "you have whitespace
+      # in the value" diagnosis instead of the more cryptic "not a
+      # valid SHA-256 digest". Symmetric with the image.tag fix.
+      image.digest: "sha256:abc 123def4567890abc123def4567890abc123def4567890abc123def4567890"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
 
   # ---------------------------------------------------------------
   # Happy paths: pinned tag form

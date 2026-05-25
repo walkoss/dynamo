@@ -1092,6 +1092,44 @@ class TestApplyCap(unittest.TestCase):
         # actually capped.
         self.assertNotIn(0, power_agent._managed_gpu_indices)
 
+    def test_apply_cap_propagates_non_dcgm_exception(self):
+        """Non-DCGMError exceptions MUST propagate out of apply_cap.
+
+        Regression guard for the PR9790 review: the original
+        ``except Exception`` masked programming/binding defects
+        (e.g. the v1.10 ``dcgmvalue.DCGM_INT32_BLANK`` AttributeError,
+        documented in ``_apply_cap_inner``'s docstring) as normal
+        apply failures, which both silenced the bug AND incorrectly
+        ticked ``apply_failures_total`` — a metric reserved for
+        "the cap write itself failed". After narrowing to
+        ``dcgm_structs.DCGMError``, an AttributeError surfaces to
+        the reconcile loop instead of being absorbed.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        self._seed_constraints_and_uuid(modules, handle, min_w=100, max_w=700)
+        group = modules["pydcgm"].DcgmGroup.return_value
+        # Simulate a non-DCGM defect inside the write path — e.g. a
+        # binding-attribute mismatch on a future pydcgm version.
+        group.config.Set.side_effect = AttributeError(
+            "simulated pydcgm binding regression"
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with self.assertRaises(AttributeError) as ctx:
+                actuator.apply_cap(0, 300)
+
+        self.assertIn("simulated pydcgm binding regression", str(ctx.exception))
+        # The "cap write failed" failure metric MUST NOT tick — that
+        # metric is reserved for DCGMError outcomes. A binding bug is
+        # a different failure class and using the same metric would
+        # hide the regression behind normal cap-failure alerting.
+        metrics.apply_failures_total.inc.assert_not_called()
+        # No managed-state bookkeeping ran (we never reached the
+        # success path), and no applied_limit_watts gauge tick.
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+        metrics.applied_limit_watts.labels.assert_not_called()
+
     def test_apply_cap_blanks_workload_power_profiles(self):
         """Every workload-profile slot MUST be set to DCGM_INT32_BLANK.
 

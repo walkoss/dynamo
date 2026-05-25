@@ -46,12 +46,17 @@ helm install power-agent ./deploy/helm/charts/power-agent \
   --set agent.safeDefaultWatts=500
 ```
 
-> **Image tag MUST match the chart's `appVersion`** (chart v1.1.0
-> requires the v1.1.0 image because the chart renders the new
-> `--actuator` / `--dcgm-*` CLI flags that earlier images don't
-> accept, and `power_agent.py` imports the v1.1.0-only `actuator`
-> module). Confirm with `helm show chart … | grep appVersion`. Use
-> `sha256:digest` for immutable production pinning.
+> **Image tag MUST match the chart's `appVersion`.** Confirm the
+> right tag for this chart with `helm show chart ./deploy/helm/charts/power-agent | grep appVersion`
+> and pass it as `--set image.tag=v<appVersion>`. The chart and the
+> agent image co-evolve: each chart release renders the CLI flags
+> (`--actuator`, `--dcgm-*`, ...) understood by its matching agent
+> release, and `power_agent.py` imports actuator implementations
+> shipped in the same image. Mixing a newer chart with an older
+> image is a fast path to "unknown flag" / `ImportError` at
+> container start, so the chart and image versions are intentionally
+> locked together. Use `--set image.digest=sha256:<64hex>` instead of
+> a tag for immutable production pinning.
 
 ### Install with the DCGM actuator
 

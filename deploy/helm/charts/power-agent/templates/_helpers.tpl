@@ -114,8 +114,14 @@ A passing chart install is guaranteed to render either
 {{- fail (printf "image.tag and image.digest are mutually exclusive (got tag=%q digest=%q). Pick one — digest gives strict content-addressed reproducibility, tag is human-readable." $tag $digest) -}}
 {{- end -}}
 {{- if $tag -}}
-{{- if ne $tag (trim $tag) -}}
-{{- fail (printf "image.tag=%q has leading/trailing whitespace; OCI tags do not permit whitespace and rendering it verbatim would produce an invalid image reference (e.g. `repo: v1.1.0 `). Fix the --set / values.yaml input. Hint: --set-string preserves whitespace exactly as quoted." $tag) -}}
+{{/* PR9790 follow-up: `ne $tag (trim $tag)` only caught leading/
+    trailing whitespace. Internal whitespace (e.g. `image.tag="v1 .1.0"`
+    from a copy/paste error or a YAML-quoted typo) passed through and
+    rendered an invalid OCI image reference like `repo:v1 .1.0`,
+    deferring failure from template time to kubelet pull time.
+    `regexMatch "\\s" $tag` catches any whitespace anywhere. */}}
+{{- if regexMatch "\\s" $tag -}}
+{{- fail (printf "image.tag=%q contains whitespace; OCI tags do not permit whitespace and rendering it verbatim would produce an invalid image reference (e.g. `repo: v1.1.0 ` or `repo:v1 .1.0`). Fix the --set / values.yaml input. Hint: --set-string preserves whitespace exactly as quoted." $tag) -}}
 {{- end -}}
 {{- $tagLower := $tag | lower -}}
 {{- if eq $tagLower "latest" -}}
@@ -126,8 +132,13 @@ A passing chart install is guaranteed to render either
 {{- end -}}
 {{- end -}}
 {{- if $digest -}}
-{{- if ne $digest (trim $digest) -}}
-{{- fail (printf "image.digest=%q has leading/trailing whitespace; OCI digests do not permit whitespace. Fix the --set / values.yaml input." $digest) -}}
+{{/* Same symmetry as $tag above: trim only catches edge whitespace.
+    The strict sha256-format regex below would already reject internal
+    whitespace by construction, but firing the dedicated whitespace
+    error first gives operators a clearer diagnosis than a generic
+    "not a valid SHA-256 digest" message. */}}
+{{- if regexMatch "\\s" $digest -}}
+{{- fail (printf "image.digest=%q contains whitespace; OCI digests do not permit whitespace. Fix the --set / values.yaml input." $digest) -}}
 {{- end -}}
 {{- if not (regexMatch "^sha256:[0-9a-fA-F]{64}$" $digest) -}}
 {{- fail (printf "image.digest=%q is not a valid SHA-256 digest. Must match sha256:<64 hex chars> exactly (SHA-256 is 32 bytes = 64 nybbles). Anything shorter is a truncated digest; anything longer is a typo. Example: image.digest=sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855. PR #9682 follow-up tightened this from {32,} to {64}." $digest) -}}

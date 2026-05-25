@@ -537,7 +537,18 @@ class DcgmActuator:
                 if self._handle is not None:
                     self._handle.Shutdown()
             except Exception:
-                pass
+                # Intentional: this is best-effort cleanup of an already
+                # dead hostengine connection. Aborting reconnect on
+                # cleanup failure would be strictly worse — the stale
+                # handle is local-only, we're about to drop it. Log so
+                # the failure is still visible in outage diagnosis (per
+                # PR9790 review on silent exception swallowing), then
+                # continue to re-init.
+                logger.exception(
+                    "DcgmActuator reconnect cleanup: handle.Shutdown() "
+                    "failed on the stale handle; dropping it and "
+                    "continuing with re-init."
+                )
             self._handle = None
             self._system = None
 
@@ -609,7 +620,7 @@ class DcgmActuator:
         uuid = self._dcgm_uuid_by_idx[gpu_idx]
         try:
             nvml_idx = self._nvml_index_by_uuid[uuid]
-        except KeyError:
+        except KeyError as err:
             # Should not happen — _ensure_identity_map raises loudly
             # on missing UUIDs at build time. If we get here, a GPU
             # disappeared from NVML's view between identity-map build
@@ -619,7 +630,7 @@ class DcgmActuator:
                 f"DcgmActuator.list_running_pids: GPU UUID {uuid!r} "
                 f"(DCGM gpu_idx={gpu_idx}) is no longer visible to "
                 "NVML. Suspect mid-reconcile device hot-unplug."
-            )
+            ) from err
         handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
         return [p.pid for p in pynvml.nvmlDeviceGetComputeRunningProcesses(handle)]
 
@@ -772,9 +783,28 @@ class DcgmActuator:
         min_w, max_w = self.constraints_w(gpu_idx)
         effective_w = self._clamp_with_metrics(watts, min_w, max_w, gpu_idx)
 
+        # Lazy import (deferred until we're actually about to call into
+        # DCGM): keeps the actuator constructible and the "no metrics"
+        # guard above runnable on hosts without the DCGM Python
+        # bindings (tests, NVML-only nodes). Surrounding methods
+        # (`_with_reconnect`, `_apply_cap_inner`, etc.) follow the
+        # same pattern. Scoped to before the try so the narrowed
+        # `except dcgm_structs.DCGMError` can resolve.
+        import dcgm_structs
+
         try:
             return self._apply_cap_inner(gpu_idx, effective_w)
-        except Exception as e:
+        except dcgm_structs.DCGMError as e:
+            # Narrow on purpose (PR9790 review): only DCGM write errors
+            # are part of the "cap-write failed, log + bump metric +
+            # return effective_w" contract. AttributeError on the
+            # pydcgm bindings (we hit one such bug at v1.10 around
+            # dcgmvalue.DCGM_INT32_BLANK — see _apply_cap_inner
+            # docstring), RuntimeError from sustained
+            # CONNECTION_NOT_VALID after _with_reconnect re-init, or
+            # any other programming defect MUST surface so it gets
+            # fixed instead of being silently absorbed as a normal
+            # apply failure.
             logger.error(
                 "dcgmConfigSet GPU %d → %d W failed: %s",
                 gpu_idx,
