@@ -292,6 +292,29 @@ class TestApplyPowerAnnotations:
         mock_kube_api.patch_pod_annotation.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_advisory_mode_skips_patch(self, connector, mock_kube_api):
+        """advisory=True must produce zero PATCH calls even when annotations are stale.
+
+        Pod annotations are a cluster-visible side effect on customer-owned
+        Pod objects; advisory mode (PR #9683 review) must mirror the
+        contract that ``_apply_scaling_targets`` already follows — log
+        intent, mutate nothing.
+        """
+        pod = _mock_pod("worker-0")  # no annotation → would normally PATCH
+        connector.get_component_pods = Mock(return_value=[pod])
+
+        planner = _bare_planner(
+            connector,
+            _power_config(prefill_cap=300, advisory=True),
+            require_prefill=True,
+            require_decode=False,
+        )
+        await planner._apply_power_annotations()
+
+        connector.get_component_pods.assert_not_called()
+        mock_kube_api.patch_pod_annotation.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_skips_entirely_for_non_kubernetes_connector(self, mock_kube_api):
         """Non-K8s connectors don't have patch_pod_annotation; method must bail early."""
         non_k8s_connector = Mock()  # not a KubernetesConnector instance

@@ -760,7 +760,14 @@ class NativePlannerBase:
         Called after _apply_effects() on every tick so newly-created pods
         pick up the cap within one tick, and AIC-driven cap changes (Phase 3+)
         propagate to all running pods automatically.
+
+        Skipped in advisory mode — annotations are a cluster-visible side
+        effect on customer-owned Pod objects, so advisory runs must observe
+        the contract that ``_apply_scaling_targets`` already follows: log
+        intent, mutate nothing.
         """
+        if self.config.advisory:
+            return
         if not self.config.enable_power_awareness:
             return
         if not isinstance(self.connector, KubernetesConnector):
