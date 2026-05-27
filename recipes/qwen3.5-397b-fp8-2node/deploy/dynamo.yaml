@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Vanilla aggregated Dynamo for Qwen3.5-397B-A17B-FP8 with KV-aware
+# routing across 2 Worker pods on 2 distinct H100 nodes.
+#
+# Topology:
+#
+#       Frontend  (--router-mode kv)
+#          |
+#     +----+----+
+#     |         |
+#  Worker-A   Worker-B
+#  TP=8        TP=8
+#  node A      node B   (any 2 H100-80GB-HBM3 nodes,
+#                        forced to distinct hostnames via
+#                        topologySpreadConstraints)
+#
+# KV-events publisher on each Worker emits block-add/evict over ZMQ
+# (topic kv-events). The Frontend's KV indexer consumes them to make
+# routing decisions based on cached-prefix overlap with the incoming
+# request. With --router-reset-states the Frontend wipes prior state
+# on restart so we don't carry over stale block hashes from a
+# previous run.
+#
+# Per-config flag diff vs deploy/vllm-serve.yaml:
+#   - Dynamo's frontend + worker split (vs vllm-serve's monolithic vllm)
+#   - --router-mode kv on the frontend
+#   - --kv-events-config on each worker
+#   - replicas: 2 + topologySpreadConstraints on the worker
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen397-dynamo-2node
+  labels:
+    app.kubernetes.io/name: qwen3.5-397b-fp8-2node
+    app.kubernetes.io/component: dynamo
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_HTTP_BODY_LIMIT_MB
+          value: "200"
+      extraPodSpec:
+        # Intentionally no hostname pin: the Frontend can land on
+        # either of the two Worker nodes (or a third node), since the
+        # Worker pods drive node consumption. Tolerations come from
+        # hw/${HW}.env so the Frontend can land on tainted nodes if
+        # the cluster needs it.
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          args:
+            - --router-mode
+            - kv
+            - --router-reset-states
+          command:
+            - python
+            - -m
+            - dynamo.frontend
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      subComponentType: null
+
+    VllmWorker:
+      componentType: worker
+      extraPodSpec:
+        # Spread the 2 worker replicas onto distinct hostnames.
+        # maxSkew=1 + DoNotSchedule means: if both H100 nodes have 8
+        # free GPUs at decision time, one replica goes to each;
+        # otherwise both stay Pending until capacity exists.
+        # (Required for our "2 nodes" topology — kai-scheduler's
+        # `required` podAffinity would deadlock under gang scheduling,
+        # but topologySpreadConstraints with whenUnsatisfiable=DoNotSchedule
+        # is evaluated alongside the gang and works.)
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: DoNotSchedule
+            labelSelector:
+              matchLabels:
+                nvidia.com/dynamo-graph-deployment-name: qwen397-dynamo-2node
+                nvidia.com/dynamo-component-type: worker
+        # Both replicas must land on H100-80GB-HBM3 nodes. Cluster-
+        # specific GPU product label comes from hw/${HW}.env.
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --enable-multimodal \
+                --mm-processor-cache-gb 30 \
+                --tensor-parallel-size 8 \
+                --gpu-memory-utilization 0.85 \
+                --max-model-len 32768 \
+                --enable-prefix-caching \
+                --no-enable-log-requests \
+                --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.5-397B-A17B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            - name: DYN_MM_ALLOW_INTERNAL
+              value: "1"
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 2
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
+      subComponentType: null
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/vllm
+          subPath: qiwa-qwen397-2node/vllm-cache
+          useAsCompilationCache: true
