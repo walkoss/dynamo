@@ -287,6 +287,7 @@ class TestInit(unittest.TestCase):
         modules["pydcgm"].DcgmHandle.assert_called_once()
         args, kwargs = modules["pydcgm"].DcgmHandle.call_args
         self.assertEqual(kwargs["ipAddress"], "hostengine.example:5555")
+        self.assertEqual(kwargs["timeoutMs"], 5000)
         self.assertEqual(actuator._discovered_gpu_ids, [0, 1, 2, 3])
         # Both NVML and DCGM are initialized on the DCGM path because
         # list_running_pids uses NVML even when --actuator=dcgm.
@@ -486,6 +487,37 @@ class TestGetUuid(unittest.TestCase):
         )
         with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
             self.assertEqual(actuator.get_uuid(0), "GPU-already-str")
+
+    def test_get_uuid_rejects_blank_string_sentinel(self):
+        """The DCGM string-blank sentinel is not a usable hardware identity.
+
+        If it enters the UUID map, DCGM/NVML PID routing can silently
+        collapse multiple GPUs onto the same fake identity. Fail before
+        the map is built instead.
+        """
+        modules = _make_dcgm_modules()
+        actuator, modules, *_ = _make_initialized_actuator(
+            modules=modules,
+            uuid_by_gpu_id={
+                0: modules["dcgmvalue"].DCGM_STR_BLANK,
+                1: "GPU-other",
+            },
+        )
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator.get_uuid(0)
+        self.assertIn("invalid blank UUID", str(ctx.exception))
+        self.assertIn("DCGM gpu_id=0", str(ctx.exception))
+
+    def test_get_uuid_rejects_non_ascii_bytes(self):
+        """Malformed bytes should fail loudly instead of becoming mojibake."""
+        actuator, modules, *_ = _make_initialized_actuator(
+            uuid_by_gpu_id={0: b"\xff\xfe", 1: b"GPU-other"}
+        )
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator.get_uuid(0)
+        self.assertIn("non-ASCII UUID", str(ctx.exception))
 
     def test_get_uuid_uses_discovered_gpu_id_not_idx(self):
         """If DCGM enumerates GPU IDs [10, 20], gpu_idx=1 must query
@@ -787,6 +819,29 @@ class TestListRunningPidsUsesNvml(unittest.TestCase):
         self.assertEqual(actuator._dcgm_uuid_by_idx, ["GPU-aaaa", "GPU-bbbb"])
         self.assertEqual(actuator._nvml_index_by_uuid, {"GPU-aaaa": 0, "GPU-bbbb": 1})
 
+    def test_cached_identity_map_fails_loud_on_mid_run_nvml_disappearance(self):
+        """If a GPU disappears from NVML after the map is built, do not
+        fall back to raw gpu_idx routing."""
+        actuator, modules, handle, _ = _make_initialized_actuator()
+        nvml = MagicMock()
+        _wire_identity_map(
+            modules,
+            nvml,
+            handle,
+            dcgm_uuids=[b"GPU-aaaa", b"GPU-bbbb"],
+            nvml_uuids=[b"GPU-aaaa", b"GPU-bbbb"],
+        )
+        nvml.nvmlDeviceGetComputeRunningProcesses.return_value = []
+
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            actuator.list_running_pids(0)  # builds the cache
+            actuator._nvml_index_by_uuid.pop("GPU-aaaa")
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator.list_running_pids(0)
+
+        self.assertIn("no longer visible to NVML", str(ctx.exception))
+        self.assertIn("GPU-aaaa", str(ctx.exception))
+
 
 class TestConstraintsW(unittest.TestCase):
     """As of v1.10, constraints_w reads `powerLimits.{min,max}PowerLimit`
@@ -816,6 +871,22 @@ class TestConstraintsW(unittest.TestCase):
         discovery.GetGpuAttributes.assert_called_with(0)
         modules["dcgm_agent"].dcgmEntityGetLatestValues.assert_not_called()
 
+    def test_constraints_w_rejects_blank_power_limits(self):
+        """GetGpuAttributes returning a DCGM blank sentinel must not feed
+        clamp math with a gigantic fake watt value."""
+        modules = _make_dcgm_modules()
+        actuator, modules, handle, _ = _make_initialized_actuator(modules=modules)
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            b"GPU-x", min_w=modules["dcgmvalue"].DCGM_FP64_BLANK, max_w=700
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator.constraints_w(0)
+
+        self.assertIn("blank DCGM power limit minPowerLimit", str(ctx.exception))
+
 
 class TestCurrentWAndDefaultW(unittest.TestCase):
     """current_w / default_w read `powerLimits.curPowerLimit` /
@@ -835,6 +906,17 @@ class TestCurrentWAndDefaultW(unittest.TestCase):
         with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
             self.assertEqual(actuator.current_w(0), 423)
         modules["dcgm_agent"].dcgmEntityGetLatestValues.assert_not_called()
+
+    def test_current_w_returns_cur_not_enforced(self):
+        """Current and enforced power limits can diverge; current_w must
+        report the live current value."""
+        actuator, modules, handle, _ = _make_initialized_actuator()
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            b"GPU-x", current_w=275, enforced_w=333
+        )
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            self.assertEqual(actuator.current_w(0), 275)
 
     def test_default_w_returns_powerlimits_default(self):
         """defaultPowerLimit is NOT maxPowerLimit. Even on SKUs where
@@ -896,6 +978,21 @@ class TestCurrentWAndDefaultW(unittest.TestCase):
             self.assertEqual(actuator.default_w(0), 700)
 
         self.assertEqual(modules["pydcgm"].DcgmHandle.call_count, 2)
+
+    def test_default_w_rejects_nan_power_limit(self):
+        actuator, modules, handle, _ = _make_initialized_actuator()
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            b"GPU-x", default_w=float("nan")
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator.default_w(0)
+
+        self.assertIn(
+            "non-finite DCGM power limit defaultPowerLimit", str(ctx.exception)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1066,6 +1163,37 @@ class TestApplyCap(unittest.TestCase):
         # The applied_limit_watts gauge was set (cap was applied).
         metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
         metrics.applied_limit_watts.labels.return_value.set.assert_called_with(300)
+
+    def test_repeated_enforce_failures_do_not_block_later_set(self):
+        """Repeated Enforce failures are recoverable per reconcile tick.
+
+        Set succeeds both times, so both cap writes are live and tracked;
+        only the dedicated Enforce-failure metric increments.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(
+            metrics=metrics, enforce=True
+        )
+        self._seed_constraints_and_uuid(modules, handle)
+        group = modules["pydcgm"].DcgmGroup.return_value
+        DCGMError = modules["dcgm_structs"].DCGMError
+        group.config.Enforce.side_effect = [
+            DCGMError(modules["dcgm_structs"].DCGM_ST_GENERIC_ERROR),
+            DCGMError(modules["dcgm_structs"].DCGM_ST_GENERIC_ERROR),
+        ]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            self.assertEqual(actuator.apply_cap(0, 300), 300)
+            self.assertEqual(actuator.apply_cap(0, 400), 400)
+
+        self.assertEqual(group.config.Set.call_count, 2)
+        self.assertEqual(group.config.Enforce.call_count, 2)
+        self.assertEqual(metrics.dcgm_enforce_failures_total.inc.call_count, 2)
+        metrics.apply_failures_total.inc.assert_not_called()
+        self.assertIn(0, power_agent._managed_gpu_indices)
+        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(400)
 
     def test_apply_cap_dcgm_generic_error_bumps_failure_metric_and_returns(self):
         """Non-CONNECTION_NOT_VALID DCGMErrors are non-fatal — the
@@ -1363,6 +1491,35 @@ class TestStaleHandleRecovery(unittest.TestCase):
                 actuator._with_reconnect(op)
 
         self.assertEqual(calls["n"], 2)  # one initial + one retry
+
+    def test_reconnect_init_failure_propagates_and_clears_stale_state(self):
+        """A sustained hostengine outage during reconnect propagates; stale
+        groups and identity maps are still flushed before the failed init."""
+        modules = _make_dcgm_modules()
+        _wire_handle(modules["pydcgm"])
+        nvml = MagicMock()
+        actuator = DcgmActuator(metrics=MagicMock())
+
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            actuator.init()
+            actuator._groups[0] = MagicMock()
+            actuator._dcgm_uuid_by_idx = ["GPU-aaaa"]
+            actuator._nvml_index_by_uuid = {"GPU-aaaa": 0}
+
+            DCGMError = modules["dcgm_structs"].DCGMError
+            CONNECTION_NOT_VALID = modules["dcgm_structs"].DCGM_ST_CONNECTION_NOT_VALID
+            modules["pydcgm"].DcgmHandle.side_effect = RuntimeError("hostengine down")
+
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator._with_reconnect(
+                    lambda: (_ for _ in ()).throw(DCGMError(CONNECTION_NOT_VALID))
+                )
+
+        self.assertIn("hostengine down", str(ctx.exception))
+        self.assertEqual(actuator._groups, {})
+        self.assertIsNone(actuator._dcgm_uuid_by_idx)
+        self.assertIsNone(actuator._nvml_index_by_uuid)
+        self.assertIsNone(actuator._handle)
 
     def test_non_dcgm_exception_propagates_immediately(self):
         """Random Python exceptions (not DCGMError subclasses) must

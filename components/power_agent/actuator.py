@@ -42,6 +42,7 @@ rather than at module top. Three reasons:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
 
 logger = logging.getLogger("power_agent.actuator")
@@ -593,7 +594,7 @@ class DcgmActuator:
             gpu_id = self._discovered_gpu_ids[gpu_idx]
             attrs = self._system.discovery.GetGpuAttributes(gpu_id)
             raw = attrs.identifiers.uuid
-            return raw.decode("ascii") if isinstance(raw, bytes) else str(raw)
+            return self._normalize_uuid(raw, source=f"DCGM gpu_id={gpu_id}")
 
         return self._with_reconnect(_op)
 
@@ -662,9 +663,7 @@ class DcgmActuator:
             for gpu_id in self._discovered_gpu_ids:
                 attrs = self._system.discovery.GetGpuAttributes(gpu_id)
                 raw = attrs.identifiers.uuid
-                uuids.append(
-                    raw.decode("ascii") if isinstance(raw, bytes) else str(raw)
-                )
+                uuids.append(self._normalize_uuid(raw, source=f"DCGM gpu_id={gpu_id}"))
             return uuids
 
         dcgm_uuids = self._with_reconnect(_read_dcgm_uuids)
@@ -676,7 +675,7 @@ class DcgmActuator:
         for nvml_idx in range(nvml_count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
             raw_uuid = pynvml.nvmlDeviceGetUUID(handle)
-            uuid = raw_uuid.decode("ascii") if isinstance(raw_uuid, bytes) else raw_uuid
+            uuid = self._normalize_uuid(raw_uuid, source=f"NVML index={nvml_idx}")
             nvml_index_by_uuid[uuid] = nvml_idx
 
         missing = [u for u in dcgm_uuids if u not in nvml_index_by_uuid]
@@ -734,7 +733,10 @@ class DcgmActuator:
         `restore_default` reads).
         """
         pl = self._power_limits(gpu_idx)
-        return int(pl.minPowerLimit), int(pl.maxPowerLimit)
+        return (
+            self._coerce_power_limit_watts(pl.minPowerLimit, "minPowerLimit", gpu_idx),
+            self._coerce_power_limit_watts(pl.maxPowerLimit, "maxPowerLimit", gpu_idx),
+        )
 
     def current_w(self, gpu_idx: int) -> int:
         """Return the GPU's current power cap in watts.
@@ -742,7 +744,9 @@ class DcgmActuator:
         Reads `powerLimits.curPowerLimit`. Used by orphan-recovery
         to skip writes that would no-op.
         """
-        return int(self._power_limits(gpu_idx).curPowerLimit)
+        return self._coerce_power_limit_watts(
+            self._power_limits(gpu_idx).curPowerLimit, "curPowerLimit", gpu_idx
+        )
 
     def default_w(self, gpu_idx: int) -> int:
         """Return the GPU's factory-default power limit in watts.
@@ -755,7 +759,80 @@ class DcgmActuator:
         on hypothetical future SKUs where default < max. See §11 Q5 +
         v1.4 changelog for the discussion.
         """
-        return int(self._power_limits(gpu_idx).defaultPowerLimit)
+        return self._coerce_power_limit_watts(
+            self._power_limits(gpu_idx).defaultPowerLimit,
+            "defaultPowerLimit",
+            gpu_idx,
+        )
+
+    @staticmethod
+    def _normalize_uuid(raw: Any, source: str) -> str:
+        """Normalize a DCGM/NVML UUID and reject blank cache sentinels.
+
+        DCGM/NVML bindings vary between ``bytes`` and ``str``. Both are
+        accepted, but blank field-cache sentinels such as ``<<<NULL>>>`` are
+        not valid hardware identities and must not enter the cross-library
+        map.
+        """
+        try:
+            uuid = raw.decode("ascii") if isinstance(raw, bytes) else str(raw)
+        except UnicodeDecodeError as e:
+            raise RuntimeError(f"DcgmActuator: non-ASCII UUID from {source}") from e
+
+        uuid = uuid.strip()
+        if not uuid or uuid == "<<<NULL>>>" or uuid.lower() == "none":
+            raise RuntimeError(
+                f"DcgmActuator: invalid blank UUID from {source}: {uuid!r}"
+            )
+        return uuid
+
+    @staticmethod
+    def _coerce_power_limit_watts(value: Any, field_name: str, gpu_idx: int) -> int:
+        """Coerce a GetGpuAttributes power-limit field and reject blanks."""
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as e:
+            raise RuntimeError(
+                f"DcgmActuator: invalid DCGM power limit {field_name} for "
+                f"GPU {gpu_idx}: {value!r}"
+            ) from e
+
+        if not math.isfinite(numeric):
+            raise RuntimeError(
+                f"DcgmActuator: non-finite DCGM power limit {field_name} for "
+                f"GPU {gpu_idx}: {value!r}"
+            )
+
+        blank_values = set()
+        try:
+            import dcgmvalue
+
+            blank_values.update(
+                {
+                    float(dcgmvalue.DCGM_INT32_BLANK),
+                    float(dcgmvalue.DCGM_INT64_BLANK),
+                    float(dcgmvalue.DCGM_FP64_BLANK),
+                }
+            )
+        except Exception:
+            # Unit tests and production DCGM paths patch/import dcgmvalue.
+            # If that import is unavailable here, the finite/positive checks
+            # below still catch the dangerous non-numeric cases.
+            pass
+
+        if numeric in blank_values:
+            raise RuntimeError(
+                f"DcgmActuator: blank DCGM power limit {field_name} for "
+                f"GPU {gpu_idx}: {value!r}"
+            )
+
+        watts = int(numeric)
+        if watts <= 0:
+            raise RuntimeError(
+                f"DcgmActuator: non-positive DCGM power limit {field_name} for "
+                f"GPU {gpu_idx}: {value!r}"
+            )
+        return watts
 
     # ------------------------------------------------------------------
     # Write methods
