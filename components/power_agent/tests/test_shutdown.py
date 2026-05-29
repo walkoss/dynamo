@@ -228,5 +228,142 @@ class TestSigtermFallback(_SigtermTestBase):
         self.assertTrue(power_agent._shutdown.is_set())
 
 
+class TestSigtermPrunesManagedGpusState(_SigtermTestBase):
+    """Per PR9790 Codex adversarial review (finding #1).
+
+    Pre-fix `_handle_sigterm` restored each managed GPU to default but
+    never pruned that GPU's UUID from `managed_gpus.json`. On the next
+    startup, orphan recovery would treat the stale UUID as agent-owned
+    and could clobber a cap applied by another workflow on a now-idle
+    GPU (different DGD, manual `nvidia-smi -pl`, vendor firmware).
+
+    This file pins:
+      1. Successful actuator restore → UUID discarded + state persisted.
+      2. Failed restore → UUID NOT discarded (cap may still be live).
+      3. UUID-lookup failure post-restore → warn, don't crash, don't prune.
+      4. Raw-NVML fallback path → uses `_nvml_uuid(handle)` and prunes.
+      5. Persist failure → log, still proceed to shutdown.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._saved_pm = power_agent._previously_managed.copy()
+        power_agent._previously_managed.clear()
+
+    def tearDown(self):
+        power_agent._previously_managed.clear()
+        power_agent._previously_managed.update(self._saved_pm)
+        super().tearDown()
+
+    def test_successful_restore_prunes_uuid_and_persists(self):
+        power_agent._managed_gpu_indices.update([0, 1])
+        power_agent._previously_managed.update({"uuid-A", "uuid-B", "uuid-stale"})
+
+        actuator = MagicMock()
+        actuator.name = "nvml"
+        actuator.get_uuid.side_effect = lambda idx: {0: "uuid-A", 1: "uuid-B"}[idx]
+        power_agent._active_actuator = actuator
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch.object(power_agent, "_persist_managed_gpus") as persist:
+                power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        # Both restored UUIDs discarded; the unrelated "uuid-stale" entry
+        # remains (we only own GPUs whose indices are in
+        # _managed_gpu_indices).
+        self.assertEqual(power_agent._previously_managed, {"uuid-stale"})
+        # State persisted exactly once with the pruned set.
+        persist.assert_called_once_with({"uuid-stale"})
+
+    def test_failed_restore_does_not_prune(self):
+        """If `restore_default` raises, the cap may still be live — we
+        must NOT prune so the next startup's orphan recovery can reset it.
+        """
+        power_agent._managed_gpu_indices.update([0, 1])
+        power_agent._previously_managed.update({"uuid-A", "uuid-B"})
+
+        actuator = MagicMock()
+        actuator.name = "dcgm"
+        actuator.restore_default.side_effect = [
+            RuntimeError("DCGM down on GPU 0"),
+            None,  # GPU 1 succeeds
+        ]
+        actuator.get_uuid.side_effect = lambda idx: {0: "uuid-A", 1: "uuid-B"}[idx]
+        power_agent._active_actuator = actuator
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch.object(power_agent, "_persist_managed_gpus") as persist:
+                power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        # GPU 0's UUID is retained (restore failed); GPU 1's is pruned.
+        self.assertEqual(power_agent._previously_managed, {"uuid-A"})
+        persist.assert_called_once_with({"uuid-A"})
+
+    def test_uuid_lookup_failure_is_logged_but_not_fatal(self):
+        """`actuator.get_uuid` raising after a successful restore must not
+        crash the SIGTERM handler. The state file retains the entry; the
+        next startup's orphan recovery harmlessly sees current_w >=
+        default_w and skips the redundant write."""
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("uuid-A")
+
+        actuator = MagicMock()
+        actuator.name = "nvml"
+        actuator.get_uuid.side_effect = RuntimeError("UUID query failed")
+        power_agent._active_actuator = actuator
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with self.assertLogs("power_agent", level="WARNING") as cm:
+                power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        joined = "\n".join(cm.output)
+        self.assertIn("UUID query failed", joined)
+        # UUID NOT pruned because we couldn't identify which one to prune.
+        self.assertEqual(power_agent._previously_managed, {"uuid-A"})
+        self.assertTrue(power_agent._shutdown.is_set())
+
+    def test_raw_nvml_fallback_prunes_via_nvml_uuid(self):
+        """When actuator is not registered, the fallback path must still
+        prune using `_nvml_uuid(handle)`."""
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("uuid-FALLBACK")
+
+        mock_nvml = MagicMock()
+        mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle_0"
+        mock_nvml.nvmlDeviceGetPowerManagementDefaultLimit.return_value = 700_000
+
+        with patch.object(power_agent, "pynvml", mock_nvml):
+            with patch.object(power_agent, "_nvml_uuid", return_value="uuid-FALLBACK"):
+                with patch.object(power_agent, "_persist_managed_gpus") as persist:
+                    power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        self.assertEqual(power_agent._previously_managed, set())
+        persist.assert_called_once_with(set())
+
+    def test_persist_failure_does_not_prevent_shutdown(self):
+        """Disk write failure at SIGTERM (read-only volume, full disk)
+        must not hang the agent. The shutdown event still fires."""
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("uuid-A")
+
+        actuator = MagicMock()
+        actuator.name = "nvml"
+        actuator.get_uuid.return_value = "uuid-A"
+        power_agent._active_actuator = actuator
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch.object(
+                power_agent,
+                "_persist_managed_gpus",
+                side_effect=OSError("read-only filesystem"),
+            ):
+                with self.assertLogs("power_agent", level="WARNING") as cm:
+                    power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        joined = "\n".join(cm.output)
+        self.assertIn("read-only filesystem", joined)
+        self.assertTrue(power_agent._shutdown.is_set())
+
+
 if __name__ == "__main__":
     unittest.main()

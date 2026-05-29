@@ -281,6 +281,18 @@ class PowerAgentMetrics:
                 "Times dcgmConfigEnforce failed AFTER a successful dcgmConfigSet "
                 "(cap is live and tracked; auto-reapply-after-GPU-reset is not).",
             )
+            # Per PR9790 Codex adversarial review (finding #3). Pre-fix
+            # `_list_pods_on_node` swallowed every API error and returned
+            # [], making a transient apiserver outage indistinguishable
+            # from a genuinely empty node. Now reconcile_once skips its
+            # cycle on list failure and increments this counter so
+            # operators can alert (e.g. >0 over 5m → RBAC regression or
+            # apiserver outage masking enforcement).
+            self.k8s_list_failures_total = Counter(
+                "dynamo_power_agent_k8s_list_failures_total",
+                "Times the Kubernetes pod-list API call failed during reconcile, "
+                "causing the cycle to be skipped (previously-applied caps remain).",
+            )
             try:
                 start_http_server(prometheus_port)
                 logger.info(
@@ -296,6 +308,7 @@ class PowerAgentMetrics:
             self.safe_default_applied_total = noop
             self.cap_clamped_total = noop
             self.dcgm_enforce_failures_total = noop
+            self.k8s_list_failures_total = noop
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +413,13 @@ def _handle_sigterm(signum, frame):
     )
     actuator = _active_actuator
     for gpu_idx in list(_managed_gpu_indices):
+        # Record the UUID of GPUs we successfully restore so we can prune
+        # them from `_previously_managed` after the loop. Without this,
+        # `managed_gpus.json` retains the stale UUID across restarts and
+        # startup orphan recovery would later "restore" a GPU this agent
+        # no longer owns — clobbering a cap applied by another workflow
+        # (different DGD, manual `nvidia-smi -pl`, vendor defaults).
+        restored_uuid: Optional[str] = None
         try:
             if actuator is not None:
                 actuator.restore_default(gpu_idx)
@@ -408,6 +428,20 @@ def _handle_sigterm(signum, frame):
                     gpu_idx,
                     actuator.name,
                 )
+                try:
+                    restored_uuid = actuator.get_uuid(gpu_idx)
+                except Exception as e:
+                    # UUID lookup failure post-restore is benign: the GPU
+                    # is already at default, so a stale entry in
+                    # managed_gpus.json just means the next startup's
+                    # orphan recovery sees `current_w >= default_w` and
+                    # skips the redundant write. Log so it's visible.
+                    logger.warning(
+                        "Could not resolve UUID for restored GPU %d "
+                        "(state file may retain stale entry): %s",
+                        gpu_idx,
+                        e,
+                    )
             else:
                 # Fallback: actuator not yet registered. Should be rare —
                 # only happens if SIGTERM fires during PowerAgent.__init__
@@ -420,8 +454,34 @@ def _handle_sigterm(signum, frame):
                     "yet at SIGTERM time)",
                     gpu_idx,
                 )
+                try:
+                    restored_uuid = _nvml_uuid(handle)
+                except Exception as e:
+                    logger.warning(
+                        "Could not resolve UUID for restored GPU %d via "
+                        "raw NVML (state file may retain stale entry): %s",
+                        gpu_idx,
+                        e,
+                    )
         except Exception as e:
             logger.exception("Failed to restore TGP on GPU %d: %s", gpu_idx, e)
+            # Do NOT prune `_previously_managed` on failure — the cap may
+            # still be live, and the next startup's orphan recovery is
+            # our only chance to reset it.
+            continue
+        if restored_uuid is not None:
+            _previously_managed.discard(restored_uuid)
+    # Persist the pruned state so the next startup's orphan recovery
+    # only touches GPUs we still own. Failure to write is non-fatal:
+    # log and proceed to shutdown.
+    try:
+        _persist_managed_gpus(_previously_managed)
+    except Exception as e:
+        logger.warning(
+            "Failed to persist pruned managed_gpus state at SIGTERM: %s "
+            "(next startup may briefly re-restore already-default GPUs).",
+            e,
+        )
     try:
         if actuator is not None:
             actuator.shutdown()
@@ -512,64 +572,88 @@ def _resolve_cap_for_gpu(
     """Determine the NVML cap to apply for a GPU given the pod annotations on it.
 
     Policy:
-      - 1 pod with annotation  → use that value.
-      - 2+ pods, all agree      → use agreed value, WARNING (multi-pod is misconfig).
-      - 2+ pods, conflict       → use safe_default_watts, ERROR.
-      - No parseable annotation → use safe_default_watts, ERROR.
+      - 1 pod with parseable int annotation       → use that value.
+      - 1 pod with missing/invalid annotation     → safe_default_watts, ERROR.
+      - 2+ pods, ALL parseable AND all agree      → agreed value, WARNING.
+      - 2+ pods, any missing/invalid/disagreement → safe_default_watts, ERROR.
+
+    Per PR9790 Codex adversarial review (finding #2): a multi-pod GPU
+    where pod A has cap 480 and pod B has no annotation must NOT inherit
+    pod A's cap. The pre-fix code filtered None before computing the
+    agree-set, so the "all agree" branch fired whenever the surviving
+    non-None values agreed, even if other pods on the same GPU had no
+    parseable cap. That let one pod's annotation silently govern
+    another pod's GPU usage — the exact cross-workload policy failure
+    the multi-pod guard is meant to contain.
+
     Returns the cap in watts.
     """
-    values = [v for _, v in pod_annotations if v is not None]
-    if not values:
-        logger.error(
-            "GPU %d: no parseable annotation on any pod; applying safe default (%d W).",
-            gpu_idx,
-            safe_default_watts,
-        )
-        # Do NOT tick apply_failures_total here — the subsequent
-        # actuator.apply_cap(gpu_idx, safe_default_watts) call WILL
-        # make the cap live (at safe-default value), so a metric
-        # whose contract is "cap NOT live" would mislead operators
-        # whose dashboards alert on it. Policy-fallback is tracked
-        # by safe_default_applied_total below.
-        metrics.safe_default_applied_total.inc()
-        return safe_default_watts
+    # Parse each pod's raw annotation. Track missing (None) and invalid
+    # (non-int) separately so the log message tells operators which
+    # pathology triggered the safe-default fallback.
+    parsed: list[int] = []
+    has_missing = False
+    has_invalid = False
+    for _, raw in pod_annotations:
+        if raw is None:
+            has_missing = True
+            continue
+        try:
+            parsed.append(int(raw))
+        except (ValueError, TypeError):
+            has_invalid = True
 
-    unique = set(values)
     if len(pod_annotations) > 1:
-        if len(unique) == 1:
-            logger.warning(
-                "GPU %d: %d pods all agree on cap %s W (multi-pod-per-GPU is unsupported topology).",
-                gpu_idx,
-                len(pod_annotations),
-                values[0],
-            )
-            metrics.multi_pod_gpu_total.labels(disposition="agree").inc()
-        else:
+        # Multi-pod-per-GPU: this is always an operator misconfig (we
+        # don't support pod-pool topologies on the same physical GPU).
+        # Either all pods agree on a parseable cap and we propagate it
+        # with a WARNING, or we fail safe.
+        if has_missing or has_invalid or len(set(parsed)) > 1:
             logger.error(
-                "GPU %d: %d pods with conflicting caps %s; applying safe default (%d W).",
+                "GPU %d: %d pods with missing/invalid/conflicting caps "
+                "(parsed=%s, has_missing=%s, has_invalid=%s); applying "
+                "safe default (%d W).",
                 gpu_idx,
                 len(pod_annotations),
-                sorted(unique),
+                sorted(set(parsed)),
+                has_missing,
+                has_invalid,
                 safe_default_watts,
             )
             metrics.multi_pod_gpu_total.labels(disposition="conflict").inc()
+            # Do NOT tick apply_failures_total — the caller WILL apply
+            # the cap at safe-default, so the cap WILL be live. That
+            # metric's contract is "cap NOT live"; policy-fallback is
+            # tracked by safe_default_applied_total.
             metrics.safe_default_applied_total.inc()
             return safe_default_watts
-
-    try:
-        return int(values[0])
-    except (ValueError, TypeError):
-        logger.error(
-            "GPU %d: annotation value %r is not an integer; applying safe default (%d W).",
+        logger.warning(
+            "GPU %d: %d pods all agree on cap %d W (multi-pod-per-GPU is unsupported topology).",
             gpu_idx,
-            values[0],
-            safe_default_watts,
+            len(pod_annotations),
+            parsed[0],
         )
-        # Same rationale as the no-parseable-annotation branch above:
-        # annotation parse failure is policy-fallback (cap WILL be
-        # applied at safe default), not an actuator-write failure.
+        metrics.multi_pod_gpu_total.labels(disposition="agree").inc()
+        return parsed[0]
+
+    # Single pod from here. Either parsed has exactly one entry (happy
+    # path) or it's empty (pod's annotation is missing or non-int).
+    if not parsed:
+        if has_missing:
+            logger.error(
+                "GPU %d: pod has no power-limit annotation; applying safe default (%d W).",
+                gpu_idx,
+                safe_default_watts,
+            )
+        else:
+            logger.error(
+                "GPU %d: pod annotation is not an integer; applying safe default (%d W).",
+                gpu_idx,
+                safe_default_watts,
+            )
         metrics.safe_default_applied_total.inc()
         return safe_default_watts
+    return parsed[0]
 
 
 # ---------------------------------------------------------------------------
@@ -643,24 +727,25 @@ class PowerAgent:
         self._core_v1 = k8s_client.CoreV1Api()
 
     def _list_pods_on_node(self) -> list:
-        """List all pods scheduled on this node."""
-        try:
-            field_selector = (
-                f"spec.nodeName={self.node_name}" if self.node_name else None
+        """List all pods scheduled on this node.
+
+        Propagates Kubernetes API errors. Per PR9790 Codex adversarial
+        review (finding #3): the pre-fix `except Exception: return []`
+        made transient apiserver failures indistinguishable from an
+        empty node, silently dropping enforcement. `reconcile_once` now
+        catches and skips the cycle (preserving last-applied caps).
+        """
+        field_selector = f"spec.nodeName={self.node_name}" if self.node_name else None
+        if self.k8s_namespace:
+            result = self._core_v1.list_namespaced_pod(
+                namespace=self.k8s_namespace,
+                field_selector=field_selector,
             )
-            if self.k8s_namespace:
-                result = self._core_v1.list_namespaced_pod(
-                    namespace=self.k8s_namespace,
-                    field_selector=field_selector,
-                )
-            else:
-                result = self._core_v1.list_pod_for_all_namespaces(
-                    field_selector=field_selector,
-                )
-            return result.items
-        except Exception as e:
-            logger.warning("Failed to list pods: %s", e)
-            return []
+        else:
+            result = self._core_v1.list_pod_for_all_namespaces(
+                field_selector=field_selector,
+            )
+        return result.items
 
     def _build_uid_to_annotation(self, pods: list) -> dict[str, Optional[str]]:
         """Map pod UID → power-limit annotation value (or None if absent/malformed)."""
@@ -672,8 +757,27 @@ class PowerAgent:
         return result
 
     def reconcile_once(self) -> None:
-        """Run one reconcile cycle: list pods, map PIDs→UIDs, apply caps."""
-        pods = self._list_pods_on_node()
+        """Run one reconcile cycle: list pods, map PIDs→UIDs, apply caps.
+
+        On Kubernetes API failure during the pod list we skip the cycle
+        rather than treating the apiserver outage as "no pods on this
+        node" (which would silently drop enforcement for the duration
+        of the outage). Previously-applied caps remain live; a NEW pod
+        arriving during the outage runs at whatever cap was last set
+        on its GPU. Operators should alert on
+        `k8s_list_failures_total > 0 over 5m`. Per PR9790 Codex
+        adversarial review (finding #3).
+        """
+        try:
+            pods = self._list_pods_on_node()
+        except Exception as e:
+            self.metrics.k8s_list_failures_total.inc()
+            logger.error(
+                "Kubernetes pod-list failed (%s); skipping reconcile cycle. "
+                "Previously-applied caps remain in effect.",
+                e,
+            )
+            return
         uid_to_annotation = self._build_uid_to_annotation(pods)
 
         for gpu_idx in range(self.device_count):

@@ -283,6 +283,106 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         self.assertEqual(agent.metrics.safe_default_applied, 1)
 
 
+class TestListPodsOnNodePropagatesErrors(unittest.TestCase):
+    """Per PR9790 Codex adversarial review (finding #3).
+
+    Pre-fix `_list_pods_on_node` swallowed every API error with
+    `except Exception: return []`. That made a transient apiserver
+    outage, RBAC regression, or network blip indistinguishable from a
+    genuinely empty node. After the fix the method propagates and
+    `reconcile_once` is responsible for the skip-this-cycle policy.
+    """
+
+    def _make_agent(self, node="node-a", namespace=None):
+        agent = object.__new__(PowerAgent)
+        agent.node_name = node
+        agent.k8s_namespace = namespace
+        agent._core_v1 = MagicMock()
+        return agent
+
+    def test_propagates_namespaced_list_exception(self):
+        agent = self._make_agent(namespace="dynamo")
+        agent._core_v1.list_namespaced_pod.side_effect = RuntimeError(
+            "503 ServiceUnavailable from apiserver"
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            agent._list_pods_on_node()
+        self.assertIn("ServiceUnavailable", str(ctx.exception))
+
+    def test_propagates_cluster_wide_list_exception(self):
+        agent = self._make_agent(namespace=None)
+        agent._core_v1.list_pod_for_all_namespaces.side_effect = RuntimeError(
+            "RBAC: pods list forbidden"
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            agent._list_pods_on_node()
+        self.assertIn("forbidden", str(ctx.exception))
+
+    def test_returns_items_on_success(self):
+        agent = self._make_agent(namespace=None)
+        fake_pod = MagicMock()
+        agent._core_v1.list_pod_for_all_namespaces.return_value = MagicMock(
+            items=[fake_pod]
+        )
+        self.assertEqual(agent._list_pods_on_node(), [fake_pod])
+
+
+class TestReconcileOnceK8sListFailure(unittest.TestCase):
+    """When `_list_pods_on_node` raises, `reconcile_once` must:
+    1. Log at ERROR level (so operators see the outage in pod logs).
+    2. Increment `metrics.k8s_list_failures_total` (for alerting).
+    3. NOT call `_reconcile_gpu` (which would build pod_annotations
+       from an effectively empty uid_to_annotation map and could
+       allow new workloads to run uncapped).
+    4. Return cleanly so the next reconcile cycle gets a chance.
+    """
+
+    def _make_agent(self):
+        agent = object.__new__(PowerAgent)
+        agent._actuator = MagicMock()
+        agent.metrics = MagicMock()
+        agent.safe_default_watts = 500
+        agent.device_count = 4
+        agent.node_name = "node-a"
+        agent.k8s_namespace = None
+        agent._core_v1 = MagicMock()
+        return agent
+
+    def test_list_failure_skips_cycle_and_ticks_metric(self):
+        agent = self._make_agent()
+        agent._core_v1.list_pod_for_all_namespaces.side_effect = RuntimeError(
+            "apiserver down"
+        )
+
+        with patch.object(agent, "_reconcile_gpu") as reconcile_gpu:
+            with self.assertLogs("power_agent", level="ERROR") as cm:
+                agent.reconcile_once()
+
+        # Per-GPU reconcile MUST be skipped — otherwise an empty
+        # uid_to_annotation map would let new workloads run uncapped.
+        reconcile_gpu.assert_not_called()
+        # Metric ticks exactly once per failed cycle for alerting.
+        agent.metrics.k8s_list_failures_total.inc.assert_called_once()
+        # Operator-visible log includes the underlying error.
+        joined = "\n".join(cm.output)
+        self.assertIn("apiserver down", joined)
+        self.assertIn("skipping reconcile cycle", joined)
+
+    def test_list_success_runs_per_gpu_reconcile(self):
+        """Pin the happy path: when the list succeeds (even if empty),
+        reconcile_once still calls _reconcile_gpu for each device. This
+        distinguishes the new failure path from the genuinely-empty
+        case the pre-fix code conflated."""
+        agent = self._make_agent()
+        agent._core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
+
+        with patch.object(agent, "_reconcile_gpu") as reconcile_gpu:
+            agent.reconcile_once()
+
+        self.assertEqual(reconcile_gpu.call_count, agent.device_count)
+        agent.metrics.k8s_list_failures_total.inc.assert_not_called()
+
+
 class TestReconcileGpuPolicyResolution(unittest.TestCase):
     """The v1.6 wiring must preserve the multi-pod-per-GPU resolution
     contract (`_resolve_cap_for_gpu`). Two pods that agree → use that
