@@ -176,8 +176,7 @@ pub async fn build_preprocessed_routing(
     // OnceLock), which covers the standalone router path as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
-    let backend_engine =
-        preprocessed_backend_engine(router, router_mode, chooser, &model_manager)?;
+    let backend_engine = preprocessed_backend_engine(router, router_mode, chooser, &model_manager)?;
 
     let prefill_router = prefill_chooser
         .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
