@@ -1235,6 +1235,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.model,
+                                # Publish the worker's per-worker LoRA slot budget so the frontend
+                                # allocator sizes placement against real capacity instead of the
+                                # hard-coded default.
+                                max_gpu_lora_count=getattr(
+                                    self.config.engine_args, "max_loras", None
+                                ),
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
