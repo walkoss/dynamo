@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AWS EKS (p5.48xlarge, H100) — KV transfer over AWS EFA via NIXL LIBFABRIC.
+# Delta vs ../_base: EFA-enabled image, LIBFABRIC backend + libfabric/EFA env,
+# and the vpc.amazonaws.com/efa RDMA resource. EFA libs ship in the image, so no
+# device hostPath mounts are needed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../_base
+patches:
+- path: patch-deploy.yaml
+  target: { group: nvidia.com, version: v1alpha1, kind: DynamoGraphDeployment, name: q32b-1p1d }
+- path: patch-deploy.json.yaml
+  target: { group: nvidia.com, version: v1alpha1, kind: DynamoGraphDeployment, name: q32b-1p1d }
+- path: patch-perf.json.yaml
+  target: { version: v1, kind: Pod, name: q32b-1p1d-benchmark }

@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nebius delta (strategic merge): a root frontend with an explicit model-cache
+# mount (the default user can't create /shared-models/hub on a fresh PVC -> empty
+# /v1/models), plus rdma/ib and the /dev/infiniband + /dev/shm device mounts on
+# the workers. The frontend's service-level mount from ../_base is removed in
+# patch-deploy.json.yaml. env edits also live there.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d
+spec:
+  services:
+    Frontend:
+      extraPodSpec:
+        mainContainer:
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - { name: shared-model-cache, mountPath: /shared-models }
+        volumes:
+        - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
+    VllmPrefillWorker:
+      extraPodSpec:
+        mainContainer:
+          volumeMounts:
+          - { name: ib,  mountPath: /dev/infiniband }
+          - { name: shm, mountPath: /dev/shm }
+        volumes:
+        - { name: ib,  hostPath: { path: /dev/infiniband } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 64Gi } }
+      resources:
+        limits:
+          custom:
+            rdma/ib: "1"
+        requests:
+          custom:
+            rdma/ib: "1"
+    VllmDecodeWorker:
+      extraPodSpec:
+        mainContainer:
+          volumeMounts:
+          - { name: ib,  mountPath: /dev/infiniband }
+          - { name: shm, mountPath: /dev/shm }
+        volumes:
+        - { name: ib,  hostPath: { path: /dev/infiniband } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 64Gi } }
+      resources:
+        limits:
+          custom:
+            rdma/ib: "1"
+        requests:
+          custom:
+            rdma/ib: "1"

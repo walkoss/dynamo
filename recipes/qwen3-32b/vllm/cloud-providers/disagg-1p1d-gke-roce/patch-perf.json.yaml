@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GKE benchmark delta. env indices: [1]=FRONTEND, [3]=VARIANT_SLUG. GKE
+# customer-cpu nodes are small (~8 CPU / 28 GiB, mostly used by daemonsets) and
+# the bench client is HTTP-only, so it requests less than the family default.
+- { op: replace, path: /metadata/name, value: q32b-1p1d-gke-roce-benchmark }
+- { op: replace, path: /spec/containers/0/env/1/value, value: q32b-1p1d-gke-roce-frontend }
+- { op: replace, path: /spec/containers/0/env/3/value, value: gke-roce }
+- { op: replace, path: /spec/containers/0/resources/requests/cpu,    value: "2" }
+- { op: replace, path: /spec/containers/0/resources/requests/memory, value: 4Gi }
+- { op: replace, path: /spec/containers/0/resources/limits/cpu,      value: "4" }
+- { op: replace, path: /spec/containers/0/resources/limits/memory,   value: 8Gi }

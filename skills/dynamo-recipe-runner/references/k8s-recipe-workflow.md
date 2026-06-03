@@ -50,10 +50,17 @@ kubectl logs -f job/model-download -n "${NAMESPACE}"
 kubectl wait --for=condition=Complete job/model-download -n "${NAMESPACE}" --timeout=6000s
 ```
 
-Apply deployment:
+Apply deployment. Most recipes ship a literal `deploy.yaml` (`apply -f`); a few are
+kustomize overlays (the recipe dir holds a `kustomization.yaml`, not a `deploy.yaml`
+— `recipe_tool.py validate` reports `"deploy_kind": "kustomize"`) and are applied
+with `apply -k`:
 
 ```bash
+# deploy.yaml recipe:
 kubectl apply -f recipes/<model>/<framework>/<mode>/deploy.yaml -n "${NAMESPACE}"
+# kustomize-overlay recipe (e.g. qwen3-32b/vllm/cloud-providers/disagg-1p1d-<csp>):
+kubectl apply -k recipes/<model>/<framework>/<mode> -n "${NAMESPACE}"
+
 kubectl get dynamographdeployment -n "${NAMESPACE}"
 kubectl get pods -n "${NAMESPACE}" -o wide
 ```

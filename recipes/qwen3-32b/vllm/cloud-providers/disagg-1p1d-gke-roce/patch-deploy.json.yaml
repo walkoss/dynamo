@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GKE A4X delta (JSON6902): name, drop the operator service-level model mounts
+# (GKE mounts the cache explicitly alongside the gib/nvidia hostPaths instead),
+# and the UCX-over-RoCE worker env. No UCX_TLS — let UCX choose transports; pin
+# the NIC set with UCX_NET_DEVICES instead.
+- { op: replace, path: /metadata/name, value: q32b-1p1d-gke-roce }
+- { op: remove, path: /spec/services/Frontend/volumeMounts }
+- { op: remove, path: /spec/services/VllmPrefillWorker/volumeMounts }
+- { op: remove, path: /spec/services/VllmDecodeWorker/volumeMounts }
+
+# --- prefill worker env (UCX over the 4 RoCE NICs) ---
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_SOCKET_IFNAME, value: "eth0" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_CROSS_NIC, value: "0" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: LD_LIBRARY_PATH, value: "/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_DEBUG, value: "WARN" } }
+
+# --- decode worker env (symmetric with prefill) ---
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_SOCKET_IFNAME, value: "eth0" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_CROSS_NIC, value: "0" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: LD_LIBRARY_PATH, value: "/opt/nvidia/nvda_nixl/lib64:/usr/local/gib/lib64:/usr/local/nvidia/lib64" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_DEBUG, value: "WARN" } }

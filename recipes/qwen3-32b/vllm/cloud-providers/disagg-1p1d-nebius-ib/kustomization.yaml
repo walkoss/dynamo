@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nebius MK8S (H200) — NDR InfiniBand via NIXL UCX (8 ConnectX-7 HCAs).
+# Delta vs ../_base: rdma/ib resource, /dev/infiniband + /dev/shm device mounts,
+# the 8-NIC UCX env, and a frontend that runs as root with an explicit model-cache
+# mount (its default user can't create the HF cache dir on a fresh PVC otherwise).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../_base
+patches:
+- path: patch-deploy.yaml
+  target: { group: nvidia.com, version: v1alpha1, kind: DynamoGraphDeployment, name: q32b-1p1d }
+- path: patch-deploy.json.yaml
+  target: { group: nvidia.com, version: v1alpha1, kind: DynamoGraphDeployment, name: q32b-1p1d }
+- path: patch-perf.json.yaml
+  target: { version: v1, kind: Pod, name: q32b-1p1d-benchmark }

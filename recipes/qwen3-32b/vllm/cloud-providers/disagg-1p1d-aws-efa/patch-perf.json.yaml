@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AWS EFA benchmark delta: pod name, the frontend service it targets, and the
+# VARIANT_SLUG that tags the artifact dir. env indices: [1]=FRONTEND, [3]=VARIANT_SLUG.
+- { op: replace, path: /metadata/name, value: q32b-1p1d-efa-benchmark }
+- { op: replace, path: /spec/containers/0/env/1/value, value: q32b-1p1d-efa-frontend }
+- { op: replace, path: /spec/containers/0/env/3/value, value: aws-efa }

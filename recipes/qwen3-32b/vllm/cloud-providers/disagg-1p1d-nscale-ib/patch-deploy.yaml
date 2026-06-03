@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nscale delta (strategic merge): GPU toleration, rdma/ib resource, and the
+# /dev/infiniband + /dev/shm device mounts on both workers. The model cache stays
+# on the operator-managed service-level mount from ../_base. env/args edits live
+# in patch-deploy.json.yaml.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d
+spec:
+  services:
+    VllmPrefillWorker:
+      extraPodSpec:
+        tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        mainContainer:
+          volumeMounts:
+          - { name: ib,  mountPath: /dev/infiniband }
+          - { name: shm, mountPath: /dev/shm }
+        volumes:
+        - { name: ib,  hostPath: { path: /dev/infiniband } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 64Gi } }
+      resources:
+        limits:
+          custom:
+            rdma/ib: "1"
+        requests:
+          custom:
+            rdma/ib: "1"
+    VllmDecodeWorker:
+      extraPodSpec:
+        tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        mainContainer:
+          volumeMounts:
+          - { name: ib,  mountPath: /dev/infiniband }
+          - { name: shm, mountPath: /dev/shm }
+        volumes:
+        - { name: ib,  hostPath: { path: /dev/infiniband } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 64Gi } }
+      resources:
+        limits:
+          custom:
+            rdma/ib: "1"
+        requests:
+          custom:
+            rdma/ib: "1"

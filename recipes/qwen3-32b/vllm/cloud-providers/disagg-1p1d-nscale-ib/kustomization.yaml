@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nscale managed K8s (B200) — NDR InfiniBand via NIXL UCX.
+# Delta vs ../_base: rdma/ib resource, /dev/infiniband + /dev/shm device mounts,
+# the GPU toleration, gpu-memory-utilization 0.70, explicit UCX kv-transfer, and
+# a deliberately non-contiguous UCX_NET_DEVICES list (compute fabric only — the
+# mlx5_6..9 side fabric must be excluded or transfers hit NIXL_ERR_REMOTE_DISCONNECT).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../_base
+patches:
+- path: patch-deploy.yaml
+  target: { group: nvidia.com, version: v1alpha1, kind: DynamoGraphDeployment, name: q32b-1p1d }
+- path: patch-deploy.json.yaml
+  target: { group: nvidia.com, version: v1alpha1, kind: DynamoGraphDeployment, name: q32b-1p1d }
+- path: patch-perf.json.yaml
+  target: { version: v1, kind: Pod, name: q32b-1p1d-benchmark }

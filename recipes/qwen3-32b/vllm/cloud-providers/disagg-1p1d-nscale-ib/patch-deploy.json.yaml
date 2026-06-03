@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nscale delta (JSON6902): name, explicit-UCX kv-transfer-config (args[5]),
+# gpu-memory-utilization 0.70 (args[10]), and the UCX worker env. NIXL_LOG_LEVEL
+# and MX_RDMA_NIC_PIN are Nscale-specific; the optional UCX_RNDV_* / UCX_LOG_LEVEL
+# tuning knobs from the original are left out (they were commented-out / inert).
+- { op: replace, path: /metadata/name, value: q32b-1p1d-nscale-ib }
+
+# --- explicit UCX backend (args[5]) ---
+- { op: replace, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/args/5, value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}' }
+- { op: replace, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/args/5, value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}' }
+
+# --- gpu-memory-utilization 0.70 (args[10]) — B200 needs the lower headroom here ---
+- { op: replace, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/args/10, value: '0.70' }
+- { op: replace, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/args/10, value: '0.70' }
+
+# --- prefill worker env (compute-fabric NICs only: mlx5_0..5,10,11) ---
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: MX_RDMA_NIC_PIN, value: "auto" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NIXL_LOG_LEVEL, value: "INFO" } }
+
+# --- decode worker env (prefill set + NCCL_DEBUG; matches the original asymmetry) ---
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: MX_RDMA_NIC_PIN, value: "auto" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NIXL_LOG_LEVEL, value: "INFO" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_DEBUG, value: "WARN" } }

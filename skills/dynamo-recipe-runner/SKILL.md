@@ -86,8 +86,11 @@ explicitly asks to author a new recipe.
 
 ### 3. Inspect And Validate
 
-Read the selected recipe README, model-cache manifests, `deploy.yaml`, and
-`perf.yaml` if present. Then run:
+Read the selected recipe README, model-cache manifests, and `deploy.yaml` +
+`perf.yaml` if present. A few recipes are kustomize overlays (the recipe dir holds
+a `kustomization.yaml` + patch files referencing a sibling `_base/`, not a literal
+`deploy.yaml`); read the patches and run `kubectl kustomize <dir>` to see the
+effective manifest. Then run:
 
 ```bash
 python3 scripts/recipe_tool.py validate \
@@ -120,7 +123,9 @@ The default sequence is:
 ```bash
 kubectl apply -f recipes/<model>/model-cache/ -n "${NAMESPACE}"
 kubectl wait --for=condition=Complete job/model-download -n "${NAMESPACE}" --timeout=6000s
+# deploy.yaml recipe: apply -f the file; kustomize-overlay recipe: apply -k the dir.
 kubectl apply -f recipes/<model>/<framework>/<mode>/deploy.yaml -n "${NAMESPACE}"
+kubectl apply -k recipes/<model>/<framework>/<mode> -n "${NAMESPACE}"  # kustomize recipes only
 kubectl get dynamographdeployment -n "${NAMESPACE}"
 kubectl get pods -n "${NAMESPACE}" -o wide
 ```

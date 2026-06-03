@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nscale benchmark delta. env indices: [1]=FRONTEND, [3]=VARIANT_SLUG.
+- { op: replace, path: /metadata/name, value: q32b-1p1d-nscale-ib-benchmark }
+- { op: replace, path: /spec/containers/0/env/1/value, value: q32b-1p1d-nscale-ib-frontend }
+- { op: replace, path: /spec/containers/0/env/3/value, value: nscale-ib }

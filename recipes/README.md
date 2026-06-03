@@ -97,6 +97,12 @@ Each complete recipe follows this standard structure:
         └── perf.yaml (optional)  # AIPerf benchmark job
 ```
 
+A recipe may instead be a **kustomize overlay** — a `kustomization.yaml` + patch
+files that reference a shared `_base/`, applied with `kubectl apply -k <dir>`
+instead of `kubectl apply -f deploy.yaml`. This keeps closely-related variants DRY;
+see [`qwen3-32b/vllm/cloud-providers/`](qwen3-32b/vllm/cloud-providers/) (one
+overlay per cloud provider over one common base).
+
 ## Quick Start
 
 ### Prerequisites

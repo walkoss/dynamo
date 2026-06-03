@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AWS EFA delta (JSON6902): name, LIBFABRIC kv-transfer-config (args[5]), and the
+# libfabric/EFA worker env. NIXL backend selection REQUIRES the kv-transfer-config
+# to carry backends:[LIBFABRIC] — the DYN_KVBM_NIXL_BACKEND_* env alone is not
+# enough (NIXL silently falls back to UCX-over-EFA otherwise).
+- { op: replace, path: /metadata/name, value: q32b-1p1d-efa }
+
+# --- LIBFABRIC kv-transfer-config (args[5] on both workers) ---
+- op: replace
+  path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/args/5
+  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+- op: replace
+  path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/args/5
+  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+
+# --- prefill worker env (libfabric backend + EFA provider) ---
+# LD_LIBRARY_PATH must prepend /opt/nvidia/nvda_nixl/lib64 so NIXL_TELEMETRY_ENABLE=y
+# can load libcore.so.1.3; otherwise the vLLM engine crashes on init.
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC, value: "true" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: DYN_KVBM_NIXL_BACKEND_UCX, value: "false" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_PROVIDER, value: "efa" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_EFA_USE_DEVICE_RDMA, value: "1" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_LOG_LEVEL, value: "warn" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: LD_LIBRARY_PATH, value: "/opt/nvidia/nvda_nixl/lib64:/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/local/lib" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: PATH, value: "/opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_DEBUG, value: "WARN" } }
+
+# --- decode worker env (symmetric with prefill) ---
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC, value: "true" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: DYN_KVBM_NIXL_BACKEND_UCX, value: "false" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_PROVIDER, value: "efa" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_EFA_USE_DEVICE_RDMA, value: "1" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: FI_LOG_LEVEL, value: "warn" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: LD_LIBRARY_PATH, value: "/opt/nvidia/nvda_nixl/lib64:/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/usr/local/lib" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: PATH, value: "/opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_DEBUG, value: "WARN" } }

@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AKS delta (JSON6902): name, explicit-UCX kv-transfer-config (args[5]), and the
+# UCX/NCCL-IB worker env. NOTE: decode carries an extra NCCL_IB_GID_INDEX=3 that
+# prefill does not — preserved verbatim from the original recipe.
+- { op: replace, path: /metadata/name, value: q32b-1p1d-aks-ib }
+
+# --- explicit UCX backend (args[5]) ---
+- { op: replace, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/args/5, value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}' }
+- { op: replace, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/args/5, value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}' }
+
+# --- prefill worker env (UCX over IB; UCX_NET_DEVICES pins the compute fabric) ---
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_IB_HCA, value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_IB_DISABLE, value: "0" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_SOCKET_IFNAME, value: "eth0" } }
+- { op: add, path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_DEBUG, value: "WARN" } }
+
+# --- decode worker env (prefill set + NCCL_IB_GID_INDEX=3; matches original asymmetry) ---
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_IB_HCA, value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_IB_DISABLE, value: "0" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_IB_GID_INDEX, value: "3" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_SOCKET_IFNAME, value: "eth0" } }
+- { op: add, path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-, value: { name: NCCL_DEBUG, value: "WARN" } }

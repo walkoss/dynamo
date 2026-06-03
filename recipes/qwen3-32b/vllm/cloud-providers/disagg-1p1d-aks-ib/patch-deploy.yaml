@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AKS delta (strategic merge): frontend GPU toleration + ephemeral-storage request
+# (the vllm-runtime image is ~30 GB extracted; this excludes too-small-disk nodes),
+# worker GPU tolerations, the rdma/shared_ib resource, and the /dev/infiniband
+# device mount. The shared-device plugin grants access but the kernel device files
+# still need to be in the pod mount namespace. env/args edits live in
+# patch-deploy.json.yaml.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d
+spec:
+  services:
+    Frontend:
+      extraPodSpec:
+        tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "30Gi"
+    VllmPrefillWorker:
+      extraPodSpec:
+        tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        mainContainer:
+          # The model cache is ALSO mounted explicitly here (not only via the
+          # operator service-level mount) — the operator service-level mount can
+          # get overridden when extraPodSpec.volumes is set, so mount it directly.
+          volumeMounts:
+          - { name: ib, mountPath: /dev/infiniband }
+          - { name: shared-model-cache, mountPath: /shared-models }
+        volumes:
+        - { name: ib, hostPath: { path: /dev/infiniband } }
+        - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
+      resources:
+        limits:
+          custom:
+            rdma/shared_ib: "1"
+        requests:
+          custom:
+            rdma/shared_ib: "1"
+    VllmDecodeWorker:
+      extraPodSpec:
+        tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        mainContainer:
+          volumeMounts:
+          - { name: ib, mountPath: /dev/infiniband }
+          - { name: shared-model-cache, mountPath: /shared-models }
+        volumes:
+        - { name: ib, hostPath: { path: /dev/infiniband } }
+        - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
+      resources:
+        limits:
+          custom:
+            rdma/shared_ib: "1"
+        requests:
+          custom:
+            rdma/shared_ib: "1"

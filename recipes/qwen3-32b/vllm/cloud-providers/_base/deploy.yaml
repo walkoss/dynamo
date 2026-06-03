@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Fabric-agnostic base for the Qwen3-32B BF16 1P1D cross-CSP benchmark family.
+#
+# This is the single source of truth for everything that is IDENTICAL across all
+# cloud providers: the topology (1 frontend + 1 TP=4 prefill + 1 TP=4 decode), the
+# vLLM args, the NIXL telemetry, the security context, the cross-node pod
+# anti-affinity, and the shared model-cache wiring.
+#
+# It deliberately contains NO fabric specifics — no RDMA resource, no transport
+# env (UCX_NET_DEVICES / FI_* / NCCL_IB_*), no device mounts, no provider
+# scheduling. Those are the per-CSP deltas, applied by the overlays under
+# ../disagg-1p1d-<csp>/. Base is not meant to be deployed directly; deploy an
+# overlay with `kubectl apply -k disagg-1p1d-<csp>/`.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d
+spec:
+  pvcs:
+  - create: false
+    name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /shared-models
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        requests: { cpu: "4" }
+        limits:   { cpu: "8" }
+      subComponentType: null
+      volumeMounts:
+      # Frontend needs read access to the model cache to register the model
+      # card (tokenizer config, max-context, chat template).
+      - name: shared-model-cache
+        mountPoint: /shared-models
+
+    VllmPrefillWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            # Repel prefill and decode onto separate hosts so KV transfer crosses
+            # the provider RDMA fabric instead of the intra-node NVLink/CUDA-IPC
+            # shortcut. Both workers are componentType=worker (the operator puts
+            # prefill/decode on the sub-component-type label), so match "worker".
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          # Transport-neutral NIXL telemetry — every variant scrapes :19090.
+          - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          - { name: DYN_HEALTH_CHECK_ENABLED,       value: "false" }
+          - { name: HF_HOME,                        value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,             value: "INFO" }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+        requests:
+          gpu: '4'
+          custom:
+            ephemeral-storage: "2Gi"
+      subComponentType: prefill
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /shared-models
+
+    VllmDecodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "19090"
+          prometheus.io/path: "/metrics"
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values: [worker]
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          command: [python3, -m, dynamo.vllm]
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace
+          args:
+          - --model
+          - Qwen/Qwen3-32B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --tensor-parallel-size
+          - '4'
+          - --no-enable-log-requests
+          - --gpu-memory-utilization
+          - '0.90'
+          - --no-enable-prefix-caching
+          - --async-scheduling
+          - --block-size
+          - '64'
+          - --hf-overrides
+          - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - --max-model-len
+          - '131072'
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            capabilities:
+              add: [IPC_LOCK, SYS_PTRACE]
+          env:
+          - { name: NIXL_TELEMETRY_ENABLE,          value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          - { name: DYN_HEALTH_CHECK_ENABLED,       value: "false" }
+          - { name: HF_HOME,                        value: /shared-models }
+          - { name: VLLM_LOGGING_LEVEL,             value: "INFO" }
+      replicas: 1
+      resources:
+        limits:
+          gpu: '4'
+        requests:
+          gpu: '4'
+          custom:
+            ephemeral-storage: "2Gi"
+      subComponentType: decode
+      volumeMounts:
+      - name: shared-model-cache
+        mountPoint: /shared-models

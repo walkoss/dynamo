@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -31,6 +33,9 @@ class Recipe:
     perf_yaml: str | None
     model_cache_dir: str | None
     gpu_count_hint: int | None
+    # True when the recipe is a kustomize overlay (deploy via `kubectl apply -k`
+    # the recipe dir) rather than a literal deploy.yaml (`kubectl apply -f`).
+    kustomize: bool = False
 
 
 def repo_root(start: Path) -> Path:
@@ -45,6 +50,37 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_text(errors="replace")
+
+
+def render_kustomize(directory: Path) -> str | None:
+    """Render a kustomize overlay to a manifest, or None if kubectl is missing
+    or the build fails (callers fall back to scanning the raw overlay files)."""
+    if not shutil.which("kubectl"):
+        return None
+    try:
+        result = subprocess.run(
+            ["kubectl", "kustomize", str(directory)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def recipe_parts(rel_parts: tuple[str, ...]) -> tuple[str, str, str]:
+    """Map a recipe path (relative to recipes/, ending at the recipe dir) to
+    (model, framework, mode)."""
+    framework_index = next(
+        (i for i, part in enumerate(rel_parts) if part in FRAMEWORKS), None
+    )
+    if framework_index is None:
+        return rel_parts[0], "unknown", "/".join(rel_parts[1:]) or "unknown"
+    model = "/".join(rel_parts[:framework_index])
+    framework = rel_parts[framework_index]
+    mode_parts = rel_parts[framework_index + 1 :]
+    return model, framework, "/".join(mode_parts) if mode_parts else "unknown"
 
 
 def gpu_values_in_yaml_blocks(text: str, block_name: str) -> list[int]:
@@ -80,25 +116,29 @@ def gpu_count_hint(text: str) -> int | None:
     return max(values) if values else None
 
 
+def is_kustomize_overlay(kustomization: Path) -> bool:
+    """A kustomize overlay (deployable recipe) references a base and/or carries
+    patches; a bare base (e.g. _base/) just lists local resources. Bases live in
+    directories named with a leading underscore by convention and are skipped."""
+    if any(part.startswith("_") for part in kustomization.parent.parts):
+        return False
+    text = read_text(kustomization)
+    return "patches" in text or "components" in text or "../" in text
+
+
 def discover(root: Path) -> list[Recipe]:
     recipes_dir = root / "recipes"
     recipes: list[Recipe] = []
+    seen_dirs: set[Path] = set()
     for deploy in sorted(recipes_dir.rglob("deploy.yaml")):
         rel = deploy.relative_to(recipes_dir)
-        parts = rel.parts
-        framework_index = next(
-            (i for i, part in enumerate(parts) if part in FRAMEWORKS), None
-        )
-        if framework_index is None:
-            model = parts[0]
-            framework = "unknown"
-            mode_parts = parts[1:-1]
-        else:
-            model = "/".join(parts[:framework_index])
-            framework = parts[framework_index]
-            mode_parts = parts[framework_index + 1 : -1]
-        mode = "/".join(mode_parts) if mode_parts else "unknown"
+        # Skip kustomize base manifests (e.g. cloud-providers/_base/deploy.yaml);
+        # they are not independently deployable recipes.
+        if any(part.startswith("_") for part in rel.parts[:-1]):
+            continue
+        model, framework, mode = recipe_parts(rel.parts[:-1])
         recipe_dir = deploy.parent
+        seen_dirs.add(recipe_dir)
         model_cache = recipes_dir / model / "model-cache"
         perf = recipe_dir / "perf.yaml"
         text = read_text(deploy)
@@ -114,6 +154,33 @@ def discover(root: Path) -> list[Recipe]:
                 if model_cache.exists()
                 else None,
                 gpu_count_hint=gpu_count_hint(text),
+            )
+        )
+
+    # Kustomize-native recipes: a recipe dir with a kustomization.yaml (overlay)
+    # instead of a literal deploy.yaml — deployed with `kubectl apply -k`.
+    for kustomization in sorted(recipes_dir.rglob("kustomization.yaml")):
+        recipe_dir = kustomization.parent
+        if recipe_dir in seen_dirs or not is_kustomize_overlay(kustomization):
+            continue
+        rel = recipe_dir.relative_to(recipes_dir)
+        model, framework, mode = recipe_parts(rel.parts)
+        model_cache = recipes_dir / model / "model-cache"
+        rendered = render_kustomize(recipe_dir)
+        has_perf = bool(rendered and re.search(r"^\s*app:\s*benchmark", rendered, re.M))
+        recipes.append(
+            Recipe(
+                model=model,
+                framework=framework,
+                mode=mode,
+                path=str(recipe_dir.relative_to(root)),
+                deploy_yaml=str(kustomization.relative_to(root)),
+                perf_yaml=str(kustomization.relative_to(root)) if has_perf else None,
+                model_cache_dir=str(model_cache.relative_to(root))
+                if model_cache.exists()
+                else None,
+                gpu_count_hint=gpu_count_hint(rendered) if rendered else None,
+                kustomize=True,
             )
         )
     return recipes
@@ -163,23 +230,17 @@ def print_table(recipes: list[Recipe]) -> None:
         print("  ".join(str(row[i]).ljust(widths[i]) for i in range(len(headers))))
 
 
-def line_matches(path: Path, patterns: list[re.Pattern[str]]) -> list[str]:
-    hits: list[str] = []
-    if not path.exists() or not path.is_file():
-        return hits
-    for lineno, line in enumerate(read_text(path).splitlines(), start=1):
-        if any(pattern.search(line) for pattern in patterns):
-            hits.append(f"{path}:{lineno}: {line.strip()}")
-    return hits
+def metadata_names_in(text: str) -> list[str]:
+    return [
+        match.group(1)
+        for match in re.finditer(
+            r"(?m)^metadata:\n(?:  .*\n)*?  name:\s*([A-Za-z0-9_.-]+)", text
+        )
+    ]
 
 
 def metadata_names(path: Path) -> list[str]:
-    names = []
-    for match in re.finditer(
-        r"(?m)^metadata:\n(?:  .*\n)*?  name:\s*([A-Za-z0-9_.-]+)", read_text(path)
-    ):
-        names.append(match.group(1))
-    return names
+    return metadata_names_in(read_text(path))
 
 
 def model_cache_dir_for(root: Path, recipe_dir: Path) -> Path | None:
@@ -225,26 +286,54 @@ def validate(root: Path, target: Path) -> dict[str, object]:
     perf_files = [path for path in files if path.name == "perf.yaml"]
     model_cache_files = [path for path in files if "model-cache" in path.parts]
 
+    # Kustomize-native recipe: render the overlay so the checks below see the
+    # effective manifest (deploy.yaml lives in ../_base, not under the target).
+    kustomization = recipe_dir / "kustomization.yaml"
+    is_overlay = (
+        target.is_dir()
+        and not deploy_files
+        and kustomization.exists()
+        and is_kustomize_overlay(kustomization)
+    )
+    rendered_text: str | None = render_kustomize(recipe_dir) if is_overlay else None
+
+    # (label, text, is_deploy) tuples to scan — files plus the rendered overlay.
+    documents: list[tuple[str, str, bool]] = [
+        (
+            str(path.relative_to(root)) if path.is_relative_to(root) else str(path),
+            read_text(path),
+            path.name == "deploy.yaml",
+        )
+        for path in files
+    ]
+    if rendered_text is not None:
+        documents.append(
+            (f"{kustomization.relative_to(root)} (kustomize build)", rendered_text, True)
+        )
+
     warnings: list[str] = []
     blockers: list[str] = []
 
-    for path in files:
-        rel = path.relative_to(root) if path.is_relative_to(root) else path
-        text = read_text(path)
+    for label, text, is_deploy in documents:
         if PLACEHOLDER_RE.search(text):
-            warnings.append(f"{rel}: contains placeholder-looking values")
-        if path.name == "deploy.yaml" and "image:" not in text:
-            warnings.append(f"{rel}: no image field found")
+            warnings.append(f"{label}: contains placeholder-looking values")
+        if is_deploy and "image:" not in text:
+            warnings.append(f"{label}: no image field found")
         if "HF_TOKEN" in text or "HUGGING_FACE" in text or "HUGGINGFACE" in text:
             if "hf-token-secret" not in text and "secretKeyRef" not in text:
                 warnings.append(
-                    f"{rel}: references Hugging Face env vars without an obvious secret"
+                    f"{label}: references Hugging Face env vars without an obvious secret"
                 )
         if "storageClassName" in text and PLACEHOLDER_RE.search(text):
-            blockers.append(f"{rel}: storageClassName appears to be a placeholder")
+            blockers.append(f"{label}: storageClassName appears to be a placeholder")
 
-    if not deploy_files:
-        blockers.append("No deploy.yaml found for this target")
+    if is_overlay and rendered_text is None:
+        warnings.append(
+            f"{kustomization.relative_to(root)}: could not render overlay "
+            "(kubectl missing or build failed); validated raw files only"
+        )
+    if not deploy_files and not is_overlay:
+        blockers.append("No deploy.yaml or kustomization.yaml found for this target")
     if not model_cache_files and (
         recipe_dir.parts and "model-cache" not in recipe_dir.parts
     ):
@@ -252,38 +341,46 @@ def validate(root: Path, target: Path) -> dict[str, object]:
             "No model-cache YAML found under target; check the model-level model-cache directory"
         )
 
-    deployment_names = []
-    for deploy in deploy_files:
-        deployment_names.extend(metadata_names(deploy))
+    deployment_names: list[str] = []
+    for path in deploy_files:
+        deployment_names.extend(metadata_names(path))
+    if rendered_text is not None:
+        deployment_names.extend(metadata_names_in(rendered_text))
 
-    def rel_hits(pattern: re.Pattern[str]) -> list[str]:
-        return [
-            hit.replace(str(root) + "/", "")
-            for path in files
-            for hit in line_matches(path, [pattern])
-        ]
+    def doc_hits(pattern: re.Pattern[str]) -> list[str]:
+        hits: list[str] = []
+        for label, text, _ in documents:
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if pattern.search(line):
+                    hits.append(f"{label}:{lineno}: {line.strip()}")
+        return hits
+
+    gpu_hint = sum(
+        value
+        for value in (
+            gpu_count_hint(text) for _, text, is_deploy in documents if is_deploy
+        )
+        if value
+    ) or None
 
     return {
         "target": str(
             target.relative_to(root) if target.is_relative_to(root) else target
         ),
-        "deploy_files": [str(path.relative_to(root)) for path in deploy_files],
+        "deploy_kind": "kustomize" if is_overlay else "deploy.yaml",
+        "deploy_files": [str(path.relative_to(root)) for path in deploy_files]
+        or ([str(kustomization.relative_to(root))] if is_overlay else []),
         "perf_files": [str(path.relative_to(root)) for path in perf_files],
         "model_cache_files": [
             str(path.relative_to(root)) for path in model_cache_files
         ],
         "deployment_names": deployment_names,
-        "gpu_count_hint": sum(
-            value
-            for value in (gpu_count_hint(read_text(path)) for path in deploy_files)
-            if value
-        )
-        or None,
+        "gpu_count_hint": gpu_hint,
         "interesting_lines": {
-            "storageClassName": rel_hits(re.compile(r"storageClassName")),
-            "images": rel_hits(re.compile(r"^\s*image:\s*")),
-            "hf_secret": rel_hits(re.compile(r"hf-token-secret|HF_TOKEN|HUGGING")),
-            "router": rel_hits(re.compile(r"DYN_ROUTER|router-mode|router_mode")),
+            "storageClassName": doc_hits(re.compile(r"storageClassName")),
+            "images": doc_hits(re.compile(r"^\s*image:\s*")),
+            "hf_secret": doc_hits(re.compile(r"hf-token-secret|HF_TOKEN|HUGGING")),
+            "router": doc_hits(re.compile(r"DYN_ROUTER|router-mode|router_mode")),
         },
         "warnings": warnings,
         "blockers": blockers,
