@@ -209,7 +209,7 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
   }, [activeData, onLoadFull]);
 
   useEffect(() => {
-    if (activeData.complete || (!activeData.fullPayloadURL && !onLoadFull)) {
+    if (activeData.complete || !activeData.fullPayloadURL) {
       return;
     }
 
@@ -219,7 +219,7 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
 
     const handle = idleCallback(() => loadFull());
     return () => cancelIdleCallback(handle);
-  }, [activeData, loadFull, onLoadFull]);
+  }, [activeData, loadFull]);
 
   function toggleLine(line: KubeSchemaLine) {
     if (!line.foldable) {
