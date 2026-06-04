@@ -166,6 +166,23 @@ navigation:
             contents:
               - page: GKE Setup
                 path: kubernetes/cloud-providers/gke/gke.md
+      - section: API Reference
+        path: kubernetes/api-reference.md
+        contents:
+          - page: DynamoCheckpoint
+            path: kubernetes/api-reference/dynamocheckpoint.mdx
+          - page: DynamoComponentDeployment
+            path: kubernetes/api-reference/dynamocomponentdeployment.mdx
+          - page: DynamoGraphDeployment
+            path: kubernetes/api-reference/dynamographdeployment.mdx
+          - page: DynamoGraphDeploymentRequest
+            path: kubernetes/api-reference/dynamographdeploymentrequest.mdx
+          - page: DynamoGraphDeploymentScalingAdapter
+            path: kubernetes/api-reference/dynamographdeploymentscalingadapter.mdx
+          - page: DynamoModel
+            path: kubernetes/api-reference/dynamomodel.mdx
+          - page: DynamoWorkerMetadata
+            path: kubernetes/api-reference/dynamoworkermetadata.mdx
 
   # ==================== Feature Guides ====================
   - section: Feature Guides
