@@ -220,6 +220,27 @@ test("generated schema payload pages keep shallow and full data split", () => {
   }
 });
 
+test("DynamoGraphDeployment keeps a small initial schema payload", () => {
+  for (const index of [0, 1]) {
+    const initial = readSchemaPayload(`DynamoGraphDeploymentSchema${index}.md`);
+    const full = readSchemaPayload(`DynamoGraphDeploymentSchema${index}Full.md`);
+    assert.equal(initial.payload.complete, false, `v${index} initial payload should be shallow`);
+    assert.equal(full.payload.complete, true, `v${index} full payload should be complete`);
+    assert.ok(
+      initial.content.length < 100_000,
+      `v${index} initial payload should remain below 100KB, got ${initial.content.length}`,
+    );
+    assert.ok(
+      full.content.length > 3_000_000,
+      `v${index} full payload should keep the complete generated schema, got ${full.content.length}`,
+    );
+    assert.ok(
+      initial.content.length * 20 < full.content.length,
+      `v${index} initial payload should be at least 20x smaller than full payload: initial=${initial.content.length} full=${full.content.length}`,
+    );
+  }
+});
+
 test("API reference pages, lazy source map, and hidden routes stay in sync", () => {
   const apiReferenceDir = join(repoRoot, "docs/kubernetes/api-reference");
   const schemaDir = join(apiReferenceDir, "schemas");
