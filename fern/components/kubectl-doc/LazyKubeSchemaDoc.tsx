@@ -1,22 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { KubeSchemaDoc } from "./KubeSchemaDoc";
 import type { KubeSchemaDocument } from "./KubeSchemaDoc";
 
-const schemaSources: Record<string, string> = {
-  "DynamoCheckpointSchema0": "./dynamo-checkpoint-schema-0.md",
-  "DynamoComponentDeploymentSchema0": "./dynamo-component-deployment-schema-0.md",
-  "DynamoComponentDeploymentSchema1": "./dynamo-component-deployment-schema-1.md",
-  "DynamoGraphDeploymentRequestSchema0": "./dynamo-graph-deployment-request-schema-0.md",
-  "DynamoGraphDeploymentRequestSchema1": "./dynamo-graph-deployment-request-schema-1.md",
-  "DynamoGraphDeploymentScalingAdapterSchema0": "./dynamo-graph-deployment-scaling-adapter-schema-0.md",
-  "DynamoGraphDeploymentScalingAdapterSchema1": "./dynamo-graph-deployment-scaling-adapter-schema-1.md",
-  "DynamoGraphDeploymentSchema0": "./dynamo-graph-deployment-schema-0.md",
-  "DynamoGraphDeploymentSchema1": "./dynamo-graph-deployment-schema-1.md",
-  "DynamoModelSchema0": "./dynamo-model-schema-0.md",
-  "DynamoWorkerMetadataSchema0": "./dynamo-worker-metadata-schema-0.md",
+type SchemaSource = {
+  initial: string;
+  full?: string;
+};
+
+type IdleWindow = Window & {
+  requestIdleCallback?: (callback: () => void) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+const schemaSources: Record<string, SchemaSource> = {
+  "DynamoCheckpointSchema0": { initial: "./dynamo-checkpoint-schema-0.md", full: "./dynamo-checkpoint-schema-0-full.md" },
+  "DynamoComponentDeploymentSchema0": { initial: "./dynamo-component-deployment-schema-0.md", full: "./dynamo-component-deployment-schema-0-full.md" },
+  "DynamoComponentDeploymentSchema1": { initial: "./dynamo-component-deployment-schema-1.md", full: "./dynamo-component-deployment-schema-1-full.md" },
+  "DynamoGraphDeploymentRequestSchema0": { initial: "./dynamo-graph-deployment-request-schema-0.md", full: "./dynamo-graph-deployment-request-schema-0-full.md" },
+  "DynamoGraphDeploymentRequestSchema1": { initial: "./dynamo-graph-deployment-request-schema-1.md", full: "./dynamo-graph-deployment-request-schema-1-full.md" },
+  "DynamoGraphDeploymentScalingAdapterSchema0": { initial: "./dynamo-graph-deployment-scaling-adapter-schema-0.md", full: "./dynamo-graph-deployment-scaling-adapter-schema-0-full.md" },
+  "DynamoGraphDeploymentScalingAdapterSchema1": { initial: "./dynamo-graph-deployment-scaling-adapter-schema-1.md", full: "./dynamo-graph-deployment-scaling-adapter-schema-1-full.md" },
+  "DynamoGraphDeploymentSchema0": { initial: "./dynamo-graph-deployment-schema-0.md", full: "./dynamo-graph-deployment-schema-0-full.md" },
+  "DynamoGraphDeploymentSchema1": { initial: "./dynamo-graph-deployment-schema-1.md", full: "./dynamo-graph-deployment-schema-1-full.md" },
+  "DynamoModelSchema0": { initial: "./dynamo-model-schema-0.md", full: "./dynamo-model-schema-0-full.md" },
+  "DynamoWorkerMetadataSchema0": { initial: "./dynamo-worker-metadata-schema-0.md", full: "./dynamo-worker-metadata-schema-0-full.md" },
 };
 
 function resolveSchemaSource(source: string) {
@@ -45,6 +55,7 @@ function parseSchemaPayload(payload: string): KubeSchemaDocument {
 export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; filtering?: boolean }) {
   const [data, setData] = useState<KubeSchemaDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const loadingFullRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +63,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
 
     setData(null);
     setError(null);
+    loadingFullRef.current = false;
 
     if (!source) {
       setError(`Unknown schema document: ${name}`);
@@ -60,7 +72,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
       };
     }
 
-    fetch(resolveSchemaSource(source))
+    fetch(resolveSchemaSource(source.initial))
       .then((response) => {
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText}`);
@@ -83,6 +95,40 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     };
   }, [name]);
 
+  const loadFull = useCallback(() => {
+    const source = schemaSources[name]?.full;
+    if (!source || loadingFullRef.current || data?.complete) {
+      return;
+    }
+
+    loadingFullRef.current = true;
+    fetch(resolveSchemaSource(source))
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+        return response.text();
+      })
+      .then((payload) => setData(parseSchemaPayload(payload)))
+      .catch((loadError: unknown) => {
+        loadingFullRef.current = false;
+        setError(loadError instanceof Error ? loadError.message : String(loadError));
+      });
+  }, [data?.complete, name]);
+
+  useEffect(() => {
+    if (!data || data.complete) {
+      return;
+    }
+
+    const idleWindow = window as IdleWindow;
+    const idleCallback = idleWindow.requestIdleCallback ?? ((callback: () => void) => window.setTimeout(callback, 1500));
+    const cancelIdleCallback = idleWindow.cancelIdleCallback ?? ((handle: number) => window.clearTimeout(handle));
+
+    const handle = idleCallback(() => loadFull());
+    return () => cancelIdleCallback(handle);
+  }, [data, loadFull]);
+
   if (error) {
     return <div className="kdoc-fern-lazy kdoc-fern-lazy-error">Schema failed to load: {error}</div>;
   }
@@ -91,5 +137,5 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     return <div className="kdoc-fern-lazy">Loading schema...</div>;
   }
 
-  return <KubeSchemaDoc data={data} filtering={filtering} />;
+  return <KubeSchemaDoc data={data} filtering={filtering} onLoadFull={loadFull} />;
 }

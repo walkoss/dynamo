@@ -34,6 +34,7 @@ export type KubeSchemaDocument = {
   version: string;
   kind: string;
   resource?: string;
+  complete?: boolean;
   lines: KubeSchemaLine[];
   fields: KubeSchemaField[];
 };
@@ -41,11 +42,13 @@ export type KubeSchemaDocument = {
 type KubeSchemaDocProps = {
   data: KubeSchemaDocument;
   filtering?: boolean;
+  onLoadFull?: () => void;
 };
 
-export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
+export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchemaDocProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const treeRef = useRef<HTMLElement>(null);
+  const dataKeyRef = useRef("");
   const [expanded, setExpanded] = useState<Record<number, boolean>>(() => initialExpanded(data.lines));
   const [focusedId, setFocusedId] = useState(() => firstFocusableLine(data.lines)?.detailId ?? "");
   const [filter, setFilter] = useState("");
@@ -53,6 +56,13 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
   const [detailsStyle, setDetailsStyle] = useState<CSSProperties | undefined>();
 
   useEffect(() => {
+    const dataKey = `${data.apiVersion}/${data.kind}`;
+    if (dataKeyRef.current === dataKey) {
+      setExpanded((current) => ({ ...initialExpanded(data.lines), ...current }));
+      return;
+    }
+
+    dataKeyRef.current = dataKey;
     setExpanded(initialExpanded(data.lines));
     setFocusedId(firstFocusableLine(data.lines)?.detailId ?? "");
     setFilter("");
@@ -68,8 +78,8 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
 
   const normalizedFilter = filter.trim().toLowerCase();
   const visibleLines = useMemo(
-    () => visibleSchemaLines(data.lines, expanded, normalizedFilter),
-    [data.lines, expanded, normalizedFilter],
+    () => visibleSchemaLines(data.lines, expanded, normalizedFilter, fieldsById),
+    [data.lines, expanded, normalizedFilter, fieldsById],
   );
   const focusableLines = useMemo(() => visibleLines.filter(isFocusableLine), [visibleLines]);
 
@@ -91,7 +101,7 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
     line?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [focusedId]);
 
-  const focusedLine = visibleLines.find((line) => line.detailId === focusedId) ?? focusableLines[0];
+  const focusedLine = currentFieldLine(visibleLines, focusedId) ?? focusableLines[0];
   const focusedField = focusedLine?.detailId ? fieldsById.get(focusedLine.detailId) : undefined;
   const showDetails = Boolean(hasFocus && focusedField);
 
@@ -109,12 +119,11 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
     const top = Math.max(treeRect.top, headerHeight + gap);
     const bottom = Math.min(treeRect.bottom, window.innerHeight - gap);
     const maxHeight = Math.max(0, bottom - top);
-    const rightMargin = window.innerWidth - treeRect.right;
-    const right = rightMargin >= width + gap ? rightMargin - width : gap;
+    const left = Math.min(Math.max(treeRect.right + gap, gap), window.innerWidth - width - gap);
 
     setDetailsStyle({
+      left,
       maxHeight,
-      right,
       top,
       visibility: maxHeight >= 120 ? "visible" : "hidden",
       width,
@@ -138,6 +147,9 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
   function toggleLine(line: KubeSchemaLine) {
     if (!line.foldable) {
       return;
+    }
+    if (!data.complete && !lineExpanded(line, expanded)) {
+      onLoadFull?.();
     }
     setExpanded((current) => ({ ...current, [line.index]: !lineExpanded(line, current) }));
   }
@@ -189,6 +201,9 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
         return;
       case "ArrowRight":
         if (current?.foldable && !lineExpanded(current, expanded)) {
+          if (!data.complete) {
+            onLoadFull?.();
+          }
           setExpanded((state) => ({ ...state, [current.index]: true }));
         } else {
           focusLine(firstChildLine(visibleLines, current));
@@ -219,6 +234,9 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
         return;
       default:
         if (filtering && event.key.length === 1 && !event.shiftKey) {
+          if (!data.complete) {
+            onLoadFull?.();
+          }
           setFilter((value) => value + event.key);
           event.preventDefault();
         }
@@ -237,7 +255,10 @@ export function KubeSchemaDoc({ data, filtering = true }: KubeSchemaDocProps) {
     >
       <style>{styles}</style>
       <div className="kdoc-fern-toolbar">
-        {filtering && filter ? <div className="kdoc-fern-filter">filter: {filter}</div> : <div />}
+        <div className="kdoc-fern-toolbar-left">
+          <span className="kdoc-fern-title">YAML</span>
+          {filtering && filter ? <span className="kdoc-fern-filter">filter: {filter}</span> : null}
+        </div>
         <span className="kdoc-fern-hint">up/down focus, left/right fold, enter toggle, type to filter</span>
       </div>
       <div className="kdoc-fern-layout">
@@ -358,15 +379,20 @@ function FieldDetails({ field }: { field: KubeSchemaField }) {
   );
 }
 
-function visibleSchemaLines(lines: KubeSchemaLine[], expanded: Record<number, boolean>, filter: string) {
+function visibleSchemaLines(
+  lines: KubeSchemaLine[],
+  expanded: Record<number, boolean>,
+  filter: string,
+  fieldsById: Map<string, KubeSchemaField>,
+) {
   if (filter) {
-    const matchedPaths = lines.filter((line) => lineMatchesFilter(line, filter)).map((line) => line.path).filter(Boolean) as string[];
+    const matchedPaths = lines.filter((line) => lineMatchesFilter(line, filter, fieldsById)).map((line) => line.path).filter(Boolean) as string[];
     return lines.filter((line) => {
       if (!line.text.trim()) {
         return false;
       }
       if (!line.path) {
-        return lineMatchesFilter(line, filter);
+        return lineMatchesFilter(line, filter, fieldsById);
       }
       return matchedPaths.some((path) => samePath(line.path, path) || isAncestorPath(line.path, path) || isAncestorPath(path, line.path));
     });
@@ -392,8 +418,9 @@ function visibleSchemaLines(lines: KubeSchemaLine[], expanded: Record<number, bo
   return visible;
 }
 
-function lineMatchesFilter(line: KubeSchemaLine, filter: string) {
-  const text = `${line.filterText ?? ""}\n${line.field ?? ""}\n${line.path ?? ""}\n${line.description ?? ""}`.toLowerCase();
+function lineMatchesFilter(line: KubeSchemaLine, filter: string, fieldsById: Map<string, KubeSchemaField>) {
+  const field = line.detailId ? fieldsById.get(line.detailId) : undefined;
+  const text = `${line.filterText ?? ""}\n${line.field ?? ""}\n${line.path ?? ""}\n${line.description ?? ""}\n${field?.description ?? ""}`.toLowerCase();
   return text.includes(filter);
 }
 
@@ -434,13 +461,21 @@ function firstFocusableLine(lines: KubeSchemaLine[]) {
   return lines.find(isFocusableLine);
 }
 
+function currentFieldLine(lines: KubeSchemaLine[], detailId: string) {
+  return (
+    lines.find((line) => line.detailId === detailId && line.code && line.field) ??
+    lines.find((line) => line.detailId === detailId && line.code) ??
+    lines.find((line) => line.detailId === detailId)
+  );
+}
+
 function previousFocusable(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
-  const index = current ? lines.findIndex((line) => line.detailId === current.detailId) : -1;
+  const index = current ? lines.findIndex((line) => line.index === current.index) : -1;
   return lines[Math.max(0, index - 1)] ?? current;
 }
 
 function nextFocusable(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
-  const index = current ? lines.findIndex((line) => line.detailId === current.detailId) : -1;
+  const index = current ? lines.findIndex((line) => line.index === current.index) : -1;
   return lines[Math.min(lines.length - 1, index + 1)] ?? current;
 }
 
@@ -448,7 +483,7 @@ function parentLine(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
   if (!current) {
     return undefined;
   }
-  const index = lines.findIndex((line) => line.detailId === current.detailId);
+  const index = lines.findIndex((line) => line.index === current.index);
   for (let i = index - 1; i >= 0; i--) {
     if (lines[i].depth < current.depth && isFocusableLine(lines[i])) {
       return lines[i];
@@ -461,7 +496,7 @@ function firstChildLine(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
   if (!current) {
     return undefined;
   }
-  const index = lines.findIndex((line) => line.detailId === current.detailId);
+  const index = lines.findIndex((line) => line.index === current.index);
   for (let i = index + 1; i < lines.length; i++) {
     if (lines[i].depth <= current.depth) {
       break;
@@ -728,21 +763,23 @@ function cssEscape(value: string) {
 }
 
 const styles = `
-.kdoc-fern{--kdoc-fg:#1f2933;--kdoc-muted:#57606a;--kdoc-border:#d8dee4;--kdoc-panel:#f6f8fa;--kdoc-selected:#fff7cc;--kdoc-filter:#fb8500;--kdoc-required:#cf222e;--kdoc-ok:#116329;--kdoc-yaml-key:#0550ae;--kdoc-yaml-string:#0a7f42;--kdoc-yaml-comment:#6e7781;--kdoc-yaml-punct:#8c959f;--kdoc-yaml-number:#953800;--kdoc-yaml-type-number:#007c89;--kdoc-yaml-bool:#8250df;color:var(--kdoc-fg);max-width:100%;position:relative;z-index:2}
+.kdoc-fern{--kdoc-fg:#1f2933;--kdoc-muted:#57606a;--kdoc-border:#d8dee4;--kdoc-panel:#f6f8fa;--kdoc-selected:#fff7cc;--kdoc-filter:#fb8500;--kdoc-required:#cf222e;--kdoc-ok:#116329;--kdoc-yaml-key:#0550ae;--kdoc-yaml-string:#0a7f42;--kdoc-yaml-comment:#6e7781;--kdoc-yaml-punct:#8c959f;--kdoc-yaml-number:#953800;--kdoc-yaml-type-number:#007c89;--kdoc-yaml-bool:#8250df;color:var(--kdoc-fg);max-width:100%;position:relative;z-index:1000}
 .kdoc-fern *{box-sizing:border-box}
 .kdoc-fern:focus{outline:0}
 .kdoc-fern-toolbar{align-items:center;display:flex;gap:.75rem;justify-content:space-between;margin:0 0 .6rem;min-height:1.8rem}
+.kdoc-fern-toolbar-left{align-items:center;display:flex;gap:.5rem;min-width:0}
+.kdoc-fern-title{color:var(--kdoc-fg);font-size:13px;font-weight:700;line-height:1.25}
 .kdoc-fern-filter{background:#fff7cc;border:1px solid #f0d35b;border-radius:6px;color:#7a4b00;font:12px/1.25 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;padding:4px 7px}
 .kdoc-fern-hint{color:var(--kdoc-muted);font-size:12px}
 .kdoc-fern-layout{display:block;position:relative}
-.kdoc-fern-tree{background:var(--kdoc-panel);border:1px solid var(--kdoc-border);border-radius:8px;padding:10px 0}
-.kdoc-fern-line{align-items:flex-start;display:flex;font:13px/1.3 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;min-height:1.3em;padding:0 12px;white-space:pre}
+.kdoc-fern-tree{background:var(--kdoc-panel);border:1px solid var(--kdoc-border);border-radius:8px;min-width:0;overflow:hidden;padding:10px 0}
+.kdoc-fern-line{align-items:flex-start;display:flex;font:13px/1.3 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;min-height:1.3em;min-width:0;padding:0 12px;white-space:pre}
 .kdoc-fern-fold,.kdoc-fern-gutter{background:transparent;border:0;color:var(--kdoc-muted);display:block;flex:0 0 24px;font:inherit;height:1.3em;line-height:inherit;margin:0;padding:0;text-align:left;user-select:none}
 .kdoc-fern-fold{cursor:pointer}
 .kdoc-fern-fold:focus{outline:0}
 .kdoc-fern-fold::before{content:"▶";display:block;line-height:inherit}
 .kdoc-fern-fold[aria-expanded="true"]::before{content:"▼"}
-.kdoc-fern-yaml{min-width:0;white-space:pre}
+.kdoc-fern-yaml{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}
 .kdoc-fern-wrap .kdoc-fern-comment-line{display:block;flex:1 1 auto;white-space:pre-wrap}
 .kdoc-fern-yaml-key{color:var(--kdoc-yaml-key);font-weight:600}
 .kdoc-fern-yaml-string{color:var(--kdoc-yaml-string)}
@@ -755,7 +792,7 @@ const styles = `
 .kdoc-fern-required-label{background:#ffebe9;border:1px solid #ff8182;border-radius:999px;color:var(--kdoc-required);display:inline-block;font-weight:700;line-height:1.1;padding:0 .35em;vertical-align:baseline}
 .kdoc-fern-filter-hit{background:var(--kdoc-filter);border-radius:2px;color:#111;font-weight:700;padding:0 .08em}
 .kdoc-fern-selected .kdoc-fern-yaml{background:var(--kdoc-selected)}
-.kdoc-fern-details{background:#fff;border:1px solid var(--kdoc-border);border-radius:8px;box-shadow:0 8px 28px rgba(31,41,51,.14);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin-top:12px;max-height:50vh;min-width:0;overflow:auto;padding:12px;position:sticky;scrollbar-gutter:stable;top:calc(var(--header-height,72px) + 1rem);z-index:30}
+.kdoc-fern-details{background:#fff;border:1px solid var(--kdoc-border);border-radius:8px;box-shadow:0 8px 28px rgba(31,41,51,.14);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin-top:12px;max-height:50vh;min-width:0;overflow:auto;padding:12px;position:sticky;scrollbar-gutter:stable;top:calc(var(--header-height,72px) + 1rem);z-index:2147483647}
 .kdoc-fern-details h2{font-size:16px;line-height:1.25;margin:0 0 10px}
 .kdoc-fern-empty{color:var(--kdoc-muted);margin:0}
 .kdoc-fern-detail-body{display:grid;gap:12px}
