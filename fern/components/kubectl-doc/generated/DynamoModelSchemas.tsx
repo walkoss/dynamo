@@ -1,6 +1,6 @@
 "use client";
 
-import { KubeSchemaDoc } from "@/components/kubectl-doc/KubeSchemaDoc";
+import { KubeSchemaDoc } from "../KubeSchemaDoc";
 
 const kubectlDocSchemas = [
   {
