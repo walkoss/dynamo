@@ -6,7 +6,6 @@ import type { CSSProperties, FocusEvent, KeyboardEvent, ReactNode } from "react"
 export type KubeSchemaLine = {
   index: number;
   text: string;
-  description?: string;
   depth: number;
   field?: string;
   path?: string;
@@ -16,7 +15,6 @@ export type KubeSchemaLine = {
   foldable?: boolean;
   collapsed?: boolean;
   detailId?: string;
-  filterText?: string;
 };
 
 export type KubeSchemaField = {
@@ -43,7 +41,7 @@ export type KubeSchemaDocument = {
 type KubeSchemaDocProps = {
   data: KubeSchemaDocument;
   filtering?: boolean;
-  onLoadFull?: () => void;
+  onLoadFull?: () => boolean | void;
 };
 
 type IdleWindow = Window & {
@@ -78,6 +76,7 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
   const rootRef = useRef<HTMLDivElement>(null);
   const treeRef = useRef<HTMLElement>(null);
   const dataKeyRef = useRef("");
+  const dataGenerationRef = useRef(0);
   const loadingFullRef = useRef(false);
   const [loadedData, setLoadedData] = useState<KubeSchemaDocument | null>(null);
   const activeData = loadedData ?? data;
@@ -85,12 +84,22 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
   const [focusedId, setFocusedId] = useState(() => firstFocusableLine(activeData.lines)?.detailId ?? "");
   const [filter, setFilter] = useState("");
   const [hasFocus, setHasFocus] = useState(false);
+  const [isVisible, setIsVisible] = useState(false);
+  const [hydratingFull, setHydratingFull] = useState(false);
   const [detailsStyle, setDetailsStyle] = useState<CSSProperties | undefined>();
 
   useEffect(() => {
+    dataGenerationRef.current += 1;
     setLoadedData(null);
     loadingFullRef.current = false;
+    setHydratingFull(false);
   }, [data]);
+
+  useEffect(() => {
+    if (activeData.complete) {
+      setHydratingFull(false);
+    }
+  }, [activeData.complete]);
 
   useEffect(() => {
     const dataKey = `${activeData.apiVersion}/${activeData.kind}`;
@@ -181,19 +190,41 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
     };
   }, [showDetails, updateDetailsPosition, visibleLines.length]);
 
-  const loadFull = useCallback(() => {
-    if (activeData.complete) {
-      return;
-    }
-    if (onLoadFull) {
-      onLoadFull();
-      return;
-    }
-    if (!activeData.fullPayloadURL || loadingFullRef.current) {
+  useEffect(() => {
+    const element = rootRef.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setIsVisible(true);
       return;
     }
 
+    const observer = new IntersectionObserver((entries) => {
+      setIsVisible(entries.some((entry) => entry.isIntersecting));
+    }, { rootMargin: "160px 0px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const loadFull = useCallback(() => {
+    if (activeData.complete) {
+      setHydratingFull(false);
+      return;
+    }
+    if (onLoadFull) {
+      setHydratingFull(onLoadFull() !== false);
+      return;
+    }
+    if (!activeData.fullPayloadURL) {
+      setHydratingFull(false);
+      return;
+    }
+    if (loadingFullRef.current) {
+      setHydratingFull(true);
+      return;
+    }
+
+    setHydratingFull(true);
     loadingFullRef.current = true;
+    const generation = dataGenerationRef.current;
     fetch(resolveSchemaSource(activeData.fullPayloadURL))
       .then((response) => {
         if (!response.ok) {
@@ -201,15 +232,22 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
         }
         return response.text();
       })
-      .then((payload) => setLoadedData(parseSchemaPayload(payload)))
+      .then((payload) => {
+        if (generation === dataGenerationRef.current) {
+          setLoadedData(parseSchemaPayload(payload));
+        }
+      })
       .catch((loadError: unknown) => {
-        loadingFullRef.current = false;
-        console.error("kubectl-doc schema failed to load", loadError);
+        if (generation === dataGenerationRef.current) {
+          loadingFullRef.current = false;
+          setHydratingFull(false);
+          console.error("kubectl-doc schema failed to load", loadError);
+        }
       });
   }, [activeData, onLoadFull]);
 
   useEffect(() => {
-    if (activeData.complete || !activeData.fullPayloadURL) {
+    if (activeData.complete || !isVisible || (!activeData.fullPayloadURL && !onLoadFull)) {
       return;
     }
 
@@ -219,7 +257,7 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
 
     const handle = idleCallback(() => loadFull());
     return () => cancelIdleCallback(handle);
-  }, [activeData, loadFull]);
+  }, [activeData.complete, activeData.fullPayloadURL, isVisible, loadFull, onLoadFull]);
 
   function toggleLine(line: KubeSchemaLine) {
     if (!line.foldable) {
@@ -310,7 +348,7 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
         }
         return;
       default:
-        if (filtering && event.key.length === 1 && !event.shiftKey) {
+        if (filtering && event.key.length === 1 && event.key !== "/" && !event.shiftKey) {
           if (!activeData.complete) {
             loadFull();
           }
@@ -332,10 +370,12 @@ export function KubeSchemaDoc({ data, filtering = true, onLoadFull }: KubeSchema
     >
       <style>{styles}</style>
       <div className="kdoc-fern-toolbar">
-        <div className="kdoc-fern-toolbar-left">
-          <span className="kdoc-fern-title">YAML</span>
-          {filtering && filter ? <span className="kdoc-fern-filter">filter: {filter}</span> : null}
-        </div>
+        {filtering && filter ? (
+          <span className="kdoc-fern-filter">
+            filter: {filter}
+            {hydratingFull && !activeData.complete ? <span className="kdoc-fern-filter-loading">loading full schema</span> : null}
+          </span>
+        ) : <span />}
         <span className="kdoc-fern-hint">up/down focus, left/right fold, enter toggle, type to filter</span>
       </div>
       <div className="kdoc-fern-layout">
@@ -497,7 +537,7 @@ function visibleSchemaLines(
 
 function lineMatchesFilter(line: KubeSchemaLine, filter: string, fieldsById: Map<string, KubeSchemaField>) {
   const field = line.detailId ? fieldsById.get(line.detailId) : undefined;
-  const text = `${line.filterText ?? ""}\n${line.field ?? ""}\n${line.path ?? ""}\n${line.description ?? ""}\n${field?.description ?? ""}`.toLowerCase();
+  const text = `${line.field ?? ""}\n${line.path ?? ""}\n${field?.description ?? ""}`.toLowerCase();
   return text.includes(filter);
 }
 
@@ -586,7 +626,7 @@ function firstChildLine(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
 }
 
 function previousFoldable(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
-  const index = current ? lines.findIndex((line) => line.detailId === current.detailId) : lines.length;
+  const index = current ? lines.findIndex((line) => line.index === current.index) : lines.length;
   for (let i = index - 1; i >= 0; i--) {
     if (lines[i].foldable) {
       return lines[i];
@@ -596,7 +636,7 @@ function previousFoldable(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
 }
 
 function nextFoldable(lines: KubeSchemaLine[], current?: KubeSchemaLine) {
-  const index = current ? lines.findIndex((line) => line.detailId === current.detailId) : -1;
+  const index = current ? lines.findIndex((line) => line.index === current.index) : -1;
   for (let i = index + 1; i < lines.length; i++) {
     if (lines[i].foldable) {
       return lines[i];
@@ -840,23 +880,23 @@ function cssEscape(value: string) {
 }
 
 const styles = `
-.kdoc-fern{--kdoc-fg:#1f2933;--kdoc-muted:#57606a;--kdoc-border:#d8dee4;--kdoc-panel:#f6f8fa;--kdoc-selected:#fff7cc;--kdoc-filter:#fb8500;--kdoc-required:#cf222e;--kdoc-ok:#116329;--kdoc-yaml-key:#0550ae;--kdoc-yaml-string:#0a7f42;--kdoc-yaml-comment:#6e7781;--kdoc-yaml-punct:#8c959f;--kdoc-yaml-number:#953800;--kdoc-yaml-type-number:#007c89;--kdoc-yaml-bool:#8250df;color:var(--kdoc-fg);max-width:100%;position:relative;z-index:1000}
+.kdoc-fern{--kdoc-fg:#1f2933;--kdoc-muted:#57606a;--kdoc-border:#d8dee4;--kdoc-panel:#f6f8fa;--kdoc-selected:#fff7cc;--kdoc-filter:#fb8500;--kdoc-required:#cf222e;--kdoc-ok:#116329;--kdoc-yaml-key:#0550ae;--kdoc-yaml-string:#0a7f42;--kdoc-yaml-comment:#6e7781;--kdoc-yaml-punct:#8c959f;--kdoc-yaml-number:#953800;--kdoc-yaml-type-number:#007c89;--kdoc-yaml-bool:#8250df;color:var(--kdoc-fg);max-width:100%;position:relative;z-index:2147483000}
 .kdoc-fern *{box-sizing:border-box}
 .kdoc-fern:focus{outline:0}
 .kdoc-fern-toolbar{align-items:center;display:flex;gap:.75rem;justify-content:space-between;margin:0 0 .6rem;min-height:1.8rem}
-.kdoc-fern-toolbar-left{align-items:center;display:flex;gap:.5rem;min-width:0}
-.kdoc-fern-title{color:var(--kdoc-fg);font-size:13px;font-weight:700;line-height:1.25}
 .kdoc-fern-filter{background:#fff7cc;border:1px solid #f0d35b;border-radius:6px;color:#7a4b00;font:12px/1.25 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;padding:4px 7px}
+.kdoc-fern-filter-loading{color:var(--kdoc-muted);display:inline-block;margin-left:.6em}
 .kdoc-fern-hint{color:var(--kdoc-muted);font-size:12px}
 .kdoc-fern-layout{display:block;position:relative}
 .kdoc-fern-tree{background:var(--kdoc-panel);border:1px solid var(--kdoc-border);border-radius:8px;min-width:0;overflow:hidden;padding:10px 0}
-.kdoc-fern-line{align-items:flex-start;display:flex;font:13px/1.3 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;min-height:1.3em;min-width:0;padding:0 12px;white-space:pre}
-.kdoc-fern-fold,.kdoc-fern-gutter{background:transparent;border:0;color:var(--kdoc-muted);display:block;flex:0 0 24px;font:inherit;height:1.3em;line-height:inherit;margin:0;padding:0;text-align:left;user-select:none}
+.kdoc-fern-line{align-items:flex-start;display:grid;font:13px/1.3 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;grid-template-columns:24px minmax(0,1fr);min-height:1.3em;min-width:0;padding:0 12px;white-space:normal}
+.kdoc-fern-fold,.kdoc-fern-gutter{background:transparent;border:0;color:var(--kdoc-muted);display:block;font:inherit;height:1.3em;line-height:inherit;margin:0;padding:0;text-align:left;user-select:none;width:24px}
 .kdoc-fern-fold{cursor:pointer}
 .kdoc-fern-fold:focus{outline:0}
 .kdoc-fern-fold::before{content:"▶";display:block;line-height:inherit}
 .kdoc-fern-fold[aria-expanded="true"]::before{content:"▼"}
-.kdoc-fern-yaml{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}
+.kdoc-fern .kdoc-fern-yaml{display:block;inline-size:100%;max-inline-size:100%;max-width:100%;min-inline-size:0;min-width:0;overflow-wrap:anywhere!important;white-space:pre-wrap;word-break:break-word}
+.kdoc-fern .kdoc-fern-yaml *{max-inline-size:100%;overflow-wrap:anywhere!important;word-break:break-word}
 .kdoc-fern-wrap .kdoc-fern-comment-line{display:block;flex:1 1 auto;white-space:pre-wrap}
 .kdoc-fern-yaml-key{color:var(--kdoc-yaml-key);font-weight:600}
 .kdoc-fern-yaml-string{color:var(--kdoc-yaml-string)}

@@ -10,11 +10,6 @@ type SchemaSource = {
   full?: string;
 };
 
-type IdleWindow = Window & {
-  requestIdleCallback?: (callback: () => void) => number;
-  cancelIdleCallback?: (handle: number) => void;
-};
-
 const schemaSources: Record<string, SchemaSource> = {
   "DynamoCheckpointSchema0": { initial: "./dynamo-checkpoint-schema-0.md", full: "./dynamo-checkpoint-schema-0-full.md" },
   "DynamoComponentDeploymentSchema0": { initial: "./dynamo-component-deployment-schema-0.md", full: "./dynamo-component-deployment-schema-0-full.md" },
@@ -53,17 +48,39 @@ function parseSchemaPayload(payload: string): KubeSchemaDocument {
 }
 
 export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; filtering?: boolean }) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const [data, setData] = useState<KubeSchemaDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isVisible, setIsVisible] = useState(false);
+  const schemaGenerationRef = useRef(0);
+  const loadingInitialRef = useRef(false);
   const loadingFullRef = useRef(false);
+
+  useEffect(() => {
+    const element = rootRef.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setIsVisible(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      setIsVisible(entries.some((entry) => entry.isIntersecting));
+    }, { rootMargin: "160px 0px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    schemaGenerationRef.current += 1;
+    setData(null);
+    setError(null);
+    loadingInitialRef.current = false;
+    loadingFullRef.current = false;
+  }, [name]);
 
   useEffect(() => {
     let cancelled = false;
     const source = schemaSources[name];
-
-    setData(null);
-    setError(null);
-    loadingFullRef.current = false;
 
     if (!source) {
       setError(`Unknown schema document: ${name}`);
@@ -71,7 +88,14 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
         cancelled = true;
       };
     }
+    if (!isVisible || data || loadingInitialRef.current) {
+      return () => {
+        cancelled = true;
+      };
+    }
 
+    loadingInitialRef.current = true;
+    const generation = schemaGenerationRef.current;
     fetch(resolveSchemaSource(source.initial))
       .then((response) => {
         if (!response.ok) {
@@ -80,12 +104,13 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
         return response.text();
       })
       .then((payload) => {
-        if (!cancelled) {
+        if (!cancelled && generation === schemaGenerationRef.current) {
           setData(parseSchemaPayload(payload));
         }
       })
       .catch((loadError: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && generation === schemaGenerationRef.current) {
+          loadingInitialRef.current = false;
           setError(loadError instanceof Error ? loadError.message : String(loadError));
         }
       });
@@ -93,15 +118,19 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     return () => {
       cancelled = true;
     };
-  }, [name]);
+  }, [data, isVisible, name]);
 
   const loadFull = useCallback(() => {
     const source = schemaSources[name]?.full;
-    if (!source || loadingFullRef.current || data?.complete) {
-      return;
+    if (!source || data?.complete) {
+      return false;
+    }
+    if (loadingFullRef.current) {
+      return true;
     }
 
     loadingFullRef.current = true;
+    const generation = schemaGenerationRef.current;
     fetch(resolveSchemaSource(source))
       .then((response) => {
         if (!response.ok) {
@@ -109,33 +138,29 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
         }
         return response.text();
       })
-      .then((payload) => setData(parseSchemaPayload(payload)))
+      .then((payload) => {
+        if (generation === schemaGenerationRef.current) {
+          setData(parseSchemaPayload(payload));
+        }
+      })
       .catch((loadError: unknown) => {
-        loadingFullRef.current = false;
-        setError(loadError instanceof Error ? loadError.message : String(loadError));
+        if (generation === schemaGenerationRef.current) {
+          loadingFullRef.current = false;
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
       });
+    return true;
   }, [data?.complete, name]);
 
-  useEffect(() => {
-    if (!data || data.complete) {
-      return;
-    }
-
-    const idleWindow = window as IdleWindow;
-    const idleCallback = idleWindow.requestIdleCallback ?? ((callback: () => void) => window.setTimeout(callback, 1500));
-    const cancelIdleCallback = idleWindow.cancelIdleCallback ?? ((handle: number) => window.clearTimeout(handle));
-
-    const handle = idleCallback(() => loadFull());
-    return () => cancelIdleCallback(handle);
-  }, [data, loadFull]);
-
-  if (error) {
-    return <div className="kdoc-fern-lazy kdoc-fern-lazy-error">Schema failed to load: {error}</div>;
-  }
-
-  if (!data) {
-    return <div className="kdoc-fern-lazy">Loading schema...</div>;
-  }
-
-  return <KubeSchemaDoc data={data} filtering={filtering} onLoadFull={loadFull} />;
+  return (
+    <div ref={rootRef} className="kdoc-fern-lazy-frame">
+      {error ? (
+        <div className="kdoc-fern-lazy kdoc-fern-lazy-error">Schema failed to load: {error}</div>
+      ) : data ? (
+        <KubeSchemaDoc data={data} filtering={filtering} onLoadFull={loadFull} />
+      ) : (
+        <div className="kdoc-fern-lazy">Loading schema...</div>
+      )}
+    </div>
+  );
 }

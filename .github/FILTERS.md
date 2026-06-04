@@ -16,12 +16,12 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
-| `docs` | Nothing (classification only) |
+| `docs` | Fern docs checks |
 | `examples` | Nothing (classification only) |
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `docs`, `examples`, and `ignore` don't trigger any CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter.
+> **Note:** `examples` and `ignore` don't trigger any CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter.
 
 ## Fixing "Uncovered Files" Errors
 
