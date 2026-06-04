@@ -233,7 +233,6 @@ metadata:
 experimental:
   mdx-components:
     - ./components
-    - ../components
   basepath-aware: true
 
 colors:

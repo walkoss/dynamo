@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../..");
-const componentRoot = join(repoRoot, "components/kubectl-doc");
+const componentRoot = here;
 const schemaDoc = readFileSync(join(componentRoot, "KubeSchemaDoc.tsx"), "utf8");
 const lazySchemaDoc = readFileSync(join(componentRoot, "LazyKubeSchemaDoc.tsx"), "utf8");
 
