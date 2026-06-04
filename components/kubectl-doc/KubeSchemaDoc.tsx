@@ -888,15 +888,15 @@ const styles = `
 .kdoc-fern-filter-loading{color:var(--kdoc-muted);display:inline-block;margin-left:.6em}
 .kdoc-fern-hint{color:var(--kdoc-muted);font-size:12px}
 .kdoc-fern-layout{display:block;position:relative}
-.kdoc-fern-tree{background:var(--kdoc-panel);border:1px solid var(--kdoc-border);border-radius:8px;min-width:0;overflow:hidden;padding:10px 0}
-.kdoc-fern-line{align-items:flex-start;display:grid;font:13px/1.3 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;grid-template-columns:24px minmax(0,1fr);min-height:1.3em;min-width:0;padding:0 12px;white-space:normal}
+.kdoc-fern-tree{background:var(--kdoc-panel);border:1px solid var(--kdoc-border);border-radius:8px;contain:inline-size;inline-size:100%;max-inline-size:100%;min-inline-size:0;min-width:0;overflow:hidden;padding:10px 0}
+.kdoc-fern-line{align-items:flex-start;contain:inline-size;display:grid;font:13px/1.3 ui-monospace,SFMono-Regular,SFMono,Consolas,"Liberation Mono",Menlo,monospace;grid-template-columns:24px minmax(0,1fr);inline-size:100%;max-inline-size:100%;min-height:1.3em;min-inline-size:0;min-width:0;overflow:hidden;padding:0 12px;white-space:normal}
 .kdoc-fern-fold,.kdoc-fern-gutter{background:transparent;border:0;color:var(--kdoc-muted);display:block;font:inherit;height:1.3em;line-height:inherit;margin:0;padding:0;text-align:left;user-select:none;width:24px}
 .kdoc-fern-fold{cursor:pointer}
 .kdoc-fern-fold:focus{outline:0}
 .kdoc-fern-fold::before{content:"▶";display:block;line-height:inherit}
 .kdoc-fern-fold[aria-expanded="true"]::before{content:"▼"}
-.kdoc-fern .kdoc-fern-yaml{display:block;inline-size:100%;max-inline-size:100%;max-width:100%;min-inline-size:0;min-width:0;overflow-wrap:anywhere!important;white-space:pre-wrap;word-break:break-word}
-.kdoc-fern .kdoc-fern-yaml *{max-inline-size:100%;overflow-wrap:anywhere!important;word-break:break-word}
+.kdoc-fern .kdoc-fern-yaml{display:block;inline-size:100%;max-inline-size:100%;max-width:100%;min-inline-size:0;min-width:0;overflow-wrap:anywhere!important;overflow-x:hidden;white-space:pre-wrap;word-break:break-word}
+.kdoc-fern .kdoc-fern-yaml *{max-inline-size:100%;min-inline-size:0;overflow-wrap:anywhere!important;word-break:break-word}
 .kdoc-fern-wrap .kdoc-fern-comment-line{display:block;flex:1 1 auto;white-space:pre-wrap}
 .kdoc-fern-yaml-key{color:var(--kdoc-yaml-key);font-weight:600}
 .kdoc-fern-yaml-string{color:var(--kdoc-yaml-string)}

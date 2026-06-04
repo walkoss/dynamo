@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../..");
-const schemaDoc = readFileSync(join(here, "KubeSchemaDoc.tsx"), "utf8");
-const lazySchemaDoc = readFileSync(join(here, "LazyKubeSchemaDoc.tsx"), "utf8");
+const componentRoot = join(repoRoot, "components/kubectl-doc");
+const schemaDoc = readFileSync(join(componentRoot, "KubeSchemaDoc.tsx"), "utf8");
+const lazySchemaDoc = readFileSync(join(componentRoot, "LazyKubeSchemaDoc.tsx"), "utf8");
 
 function readSchemaPayload(fileName) {
   const content = readFileSync(join(repoRoot, "docs/kubernetes/api-reference/schemas", fileName), "utf8");
@@ -102,6 +103,7 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
   assert.doesNotMatch(lazySchemaDoc, /requestIdleCallback/);
   assert.doesNotMatch(lazySchemaDoc, /setTimeout\(callback, 1500\)/);
   assert.match(lazySchemaDoc, /<KubeSchemaDoc data=\{data\} filtering=\{filtering\} onLoadFull=\{loadFull\} \/>/);
+  assert.match(lazySchemaDoc, /export default LazyKubeSchemaDoc;/);
 
   const resetIndex = lazySchemaDoc.indexOf("useEffect(() => {\n    schemaGenerationRef.current += 1;\n    setData(null);");
   const resetEnd = lazySchemaDoc.indexOf("  }, [name]);", resetIndex);
@@ -115,14 +117,21 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
 });
 
 test("KubeSchemaDoc keeps long YAML/comment lines inside the schema frame", () => {
-  assert.match(schemaDoc, /\.kdoc-fern-line\{[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*white-space:normal/);
   assert.match(
     schemaDoc,
-    /\.kdoc-fern \.kdoc-fern-yaml\{[^}]*display:block[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere!important[^}]*white-space:pre-wrap/,
+    /\.kdoc-fern-tree\{[^}]*contain:inline-size[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden/,
   );
   assert.match(
     schemaDoc,
-    /\.kdoc-fern \.kdoc-fern-yaml \*\{[^}]*max-inline-size:100%[^}]*overflow-wrap:anywhere!important[^}]*word-break:break-word/,
+    /\.kdoc-fern-line\{[^}]*contain:inline-size[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*inline-size:100%[^}]*overflow:hidden[^}]*white-space:normal/,
+  );
+  assert.match(
+    schemaDoc,
+    /\.kdoc-fern \.kdoc-fern-yaml\{[^}]*display:block[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere!important[^}]*overflow-x:hidden[^}]*white-space:pre-wrap/,
+  );
+  assert.match(
+    schemaDoc,
+    /\.kdoc-fern \.kdoc-fern-yaml \*\{[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere!important[^}]*word-break:break-word/,
   );
 });
 

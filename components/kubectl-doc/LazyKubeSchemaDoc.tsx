@@ -164,3 +164,5 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     </div>
   );
 }
+
+export default LazyKubeSchemaDoc;
