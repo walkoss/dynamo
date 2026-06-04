@@ -183,6 +183,50 @@ navigation:
             path: kubernetes/api-reference/dynamomodel.mdx
           - page: DynamoWorkerMetadata
             path: kubernetes/api-reference/dynamoworkermetadata.mdx
+          - page: DynamoCheckpointSchema0
+            hidden: true
+            slug: dynamo-checkpoint-schema-0
+            path: kubernetes/api-reference/schemas/DynamoCheckpointSchema0.md
+          - page: DynamoComponentDeploymentSchema0
+            hidden: true
+            slug: dynamo-component-deployment-schema-0
+            path: kubernetes/api-reference/schemas/DynamoComponentDeploymentSchema0.md
+          - page: DynamoComponentDeploymentSchema1
+            hidden: true
+            slug: dynamo-component-deployment-schema-1
+            path: kubernetes/api-reference/schemas/DynamoComponentDeploymentSchema1.md
+          - page: DynamoGraphDeploymentRequestSchema0
+            hidden: true
+            slug: dynamo-graph-deployment-request-schema-0
+            path: kubernetes/api-reference/schemas/DynamoGraphDeploymentRequestSchema0.md
+          - page: DynamoGraphDeploymentRequestSchema1
+            hidden: true
+            slug: dynamo-graph-deployment-request-schema-1
+            path: kubernetes/api-reference/schemas/DynamoGraphDeploymentRequestSchema1.md
+          - page: DynamoGraphDeploymentScalingAdapterSchema0
+            hidden: true
+            slug: dynamo-graph-deployment-scaling-adapter-schema-0
+            path: kubernetes/api-reference/schemas/DynamoGraphDeploymentScalingAdapterSchema0.md
+          - page: DynamoGraphDeploymentScalingAdapterSchema1
+            hidden: true
+            slug: dynamo-graph-deployment-scaling-adapter-schema-1
+            path: kubernetes/api-reference/schemas/DynamoGraphDeploymentScalingAdapterSchema1.md
+          - page: DynamoGraphDeploymentSchema0
+            hidden: true
+            slug: dynamo-graph-deployment-schema-0
+            path: kubernetes/api-reference/schemas/DynamoGraphDeploymentSchema0.md
+          - page: DynamoGraphDeploymentSchema1
+            hidden: true
+            slug: dynamo-graph-deployment-schema-1
+            path: kubernetes/api-reference/schemas/DynamoGraphDeploymentSchema1.md
+          - page: DynamoModelSchema0
+            hidden: true
+            slug: dynamo-model-schema-0
+            path: kubernetes/api-reference/schemas/DynamoModelSchema0.md
+          - page: DynamoWorkerMetadataSchema0
+            hidden: true
+            slug: dynamo-worker-metadata-schema-0
+            path: kubernetes/api-reference/schemas/DynamoWorkerMetadataSchema0.md
 
   # ==================== Feature Guides ====================
   - section: Feature Guides

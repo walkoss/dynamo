@@ -6,17 +6,17 @@ import { KubeSchemaDoc } from "./KubeSchemaDoc";
 import type { KubeSchemaDocument } from "./KubeSchemaDoc";
 
 const schemaSources: Record<string, string> = {
-  "DynamoCheckpointSchema0": "../../assets/kubectl-doc/generated/DynamoCheckpointSchema0.json",
-  "DynamoComponentDeploymentSchema0": "../../assets/kubectl-doc/generated/DynamoComponentDeploymentSchema0.json",
-  "DynamoComponentDeploymentSchema1": "../../assets/kubectl-doc/generated/DynamoComponentDeploymentSchema1.json",
-  "DynamoGraphDeploymentRequestSchema0": "../../assets/kubectl-doc/generated/DynamoGraphDeploymentRequestSchema0.json",
-  "DynamoGraphDeploymentRequestSchema1": "../../assets/kubectl-doc/generated/DynamoGraphDeploymentRequestSchema1.json",
-  "DynamoGraphDeploymentScalingAdapterSchema0": "../../assets/kubectl-doc/generated/DynamoGraphDeploymentScalingAdapterSchema0.json",
-  "DynamoGraphDeploymentScalingAdapterSchema1": "../../assets/kubectl-doc/generated/DynamoGraphDeploymentScalingAdapterSchema1.json",
-  "DynamoGraphDeploymentSchema0": "../../assets/kubectl-doc/generated/DynamoGraphDeploymentSchema0.json",
-  "DynamoGraphDeploymentSchema1": "../../assets/kubectl-doc/generated/DynamoGraphDeploymentSchema1.json",
-  "DynamoModelSchema0": "../../assets/kubectl-doc/generated/DynamoModelSchema0.json",
-  "DynamoWorkerMetadataSchema0": "../../assets/kubectl-doc/generated/DynamoWorkerMetadataSchema0.json",
+  "DynamoCheckpointSchema0": "./dynamo-checkpoint-schema-0.md",
+  "DynamoComponentDeploymentSchema0": "./dynamo-component-deployment-schema-0.md",
+  "DynamoComponentDeploymentSchema1": "./dynamo-component-deployment-schema-1.md",
+  "DynamoGraphDeploymentRequestSchema0": "./dynamo-graph-deployment-request-schema-0.md",
+  "DynamoGraphDeploymentRequestSchema1": "./dynamo-graph-deployment-request-schema-1.md",
+  "DynamoGraphDeploymentScalingAdapterSchema0": "./dynamo-graph-deployment-scaling-adapter-schema-0.md",
+  "DynamoGraphDeploymentScalingAdapterSchema1": "./dynamo-graph-deployment-scaling-adapter-schema-1.md",
+  "DynamoGraphDeploymentSchema0": "./dynamo-graph-deployment-schema-0.md",
+  "DynamoGraphDeploymentSchema1": "./dynamo-graph-deployment-schema-1.md",
+  "DynamoModelSchema0": "./dynamo-model-schema-0.md",
+  "DynamoWorkerMetadataSchema0": "./dynamo-worker-metadata-schema-0.md",
 };
 
 function resolveSchemaSource(source: string) {
@@ -25,6 +25,11 @@ function resolveSchemaSource(source: string) {
   }
 
   return new URL(source, window.location.href.replace(/\/$/, "")).toString();
+}
+
+function parseSchemaPayload(payload: string): KubeSchemaDocument {
+  const match = payload.match(/```json\s*([\s\S]*?)\s*```/);
+  return JSON.parse(match ? match[1] : payload) as KubeSchemaDocument;
 }
 
 export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; filtering?: boolean }) {
@@ -50,11 +55,11 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText}`);
         }
-        return response.json() as Promise<KubeSchemaDocument>;
+        return response.text();
       })
-      .then((schema) => {
+      .then((payload) => {
         if (!cancelled) {
-          setData(schema);
+          setData(parseSchemaPayload(payload));
         }
       })
       .catch((loadError: unknown) => {
