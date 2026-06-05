@@ -2,57 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { schemaSources } from "../../kubectl-doc-schemas/sources.generated";
 import { KubeSchemaDoc } from "./KubeSchemaDoc";
 import type { KubeSchemaDocument } from "./KubeSchemaDoc";
-
-type SchemaSource = {
-  initial: string;
-  full?: string;
-};
-
-type SchemaAssetRole = "initial" | "full";
-
-const schemaAssetPath = "../../../assets/kubectl-doc/schemas";
-
-const schemaSources: Record<string, SchemaSource> = {
-  "DynamoCheckpointSchema0": { initial: "dynamo-checkpoint-schema-0.json", full: "dynamo-checkpoint-schema-0-full.json" },
-  "DynamoComponentDeploymentSchema0": { initial: "dynamo-component-deployment-schema-0.json", full: "dynamo-component-deployment-schema-0-full.json" },
-  "DynamoComponentDeploymentSchema1": { initial: "dynamo-component-deployment-schema-1.json", full: "dynamo-component-deployment-schema-1-full.json" },
-  "DynamoGraphDeploymentRequestSchema0": { initial: "dynamo-graph-deployment-request-schema-0.json", full: "dynamo-graph-deployment-request-schema-0-full.json" },
-  "DynamoGraphDeploymentRequestSchema1": { initial: "dynamo-graph-deployment-request-schema-1.json", full: "dynamo-graph-deployment-request-schema-1-full.json" },
-  "DynamoGraphDeploymentScalingAdapterSchema0": { initial: "dynamo-graph-deployment-scaling-adapter-schema-0.json", full: "dynamo-graph-deployment-scaling-adapter-schema-0-full.json" },
-  "DynamoGraphDeploymentScalingAdapterSchema1": { initial: "dynamo-graph-deployment-scaling-adapter-schema-1.json", full: "dynamo-graph-deployment-scaling-adapter-schema-1-full.json" },
-  "DynamoGraphDeploymentSchema0": { initial: "dynamo-graph-deployment-schema-0.json", full: "dynamo-graph-deployment-schema-0-full.json" },
-  "DynamoGraphDeploymentSchema1": { initial: "dynamo-graph-deployment-schema-1.json", full: "dynamo-graph-deployment-schema-1-full.json" },
-  "DynamoModelSchema0": { initial: "dynamo-model-schema-0.json", full: "dynamo-model-schema-0-full.json" },
-  "DynamoWorkerMetadataSchema0": { initial: "dynamo-worker-metadata-schema-0.json", full: "dynamo-worker-metadata-schema-0-full.json" },
-};
-
-function schemaURL(name: string, role: SchemaAssetRole, fileName: string) {
-  const asset = document.querySelector<HTMLAnchorElement>(`a[data-kdoc-schema-asset="${name}:${role}"]`);
-  if (asset?.href) {
-    return asset.href;
-  }
-
-  return `${schemaAssetPath}/${fileName}`;
-}
-
-function resolveSchemaSource(source: string) {
-  if (source.startsWith("http://") || source.startsWith("https://") || source.startsWith("/")) {
-    return source;
-  }
-
-  return new URL(source, window.location.href.replace(/\/$/, "")).toString();
-}
-
-function fetchSchema(source: string) {
-  return fetch(resolveSchemaSource(source)).then((response) => {
-    if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<KubeSchemaDocument>;
-  });
-}
 
 export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; filtering?: boolean }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -103,18 +55,9 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
 
     loadingInitialRef.current = true;
     const generation = schemaGenerationRef.current;
-    fetchSchema(schemaURL(name, "initial", source.initial))
-      .then((payload) => {
-        if (!cancelled && generation === schemaGenerationRef.current) {
-          setData(payload);
-        }
-      })
-      .catch((loadError: unknown) => {
-        if (!cancelled && generation === schemaGenerationRef.current) {
-          loadingInitialRef.current = false;
-          setError(loadError instanceof Error ? loadError.message : String(loadError));
-        }
-      });
+    if (!cancelled && generation === schemaGenerationRef.current) {
+      setData(source.initial);
+    }
 
     return () => {
       cancelled = true;
@@ -122,8 +65,8 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
   }, [data, isVisible, name]);
 
   const loadFull = useCallback(() => {
-    const source = schemaSources[name]?.full;
-    if (!source || data?.complete) {
+    const load = schemaSources[name]?.loadFull;
+    if (!load || data?.complete) {
       return false;
     }
     if (fullLoadRef.current) {
@@ -131,7 +74,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     }
 
     const generation = schemaGenerationRef.current;
-    const promise = fetchSchema(schemaURL(name, "full", source))
+    const promise = load()
       .then((next) => {
         if (generation !== schemaGenerationRef.current) {
           throw new Error("schema request superseded");
