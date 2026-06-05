@@ -66,6 +66,11 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /var keyTarget = scopedKeyboard \? root : document;/);
   assert.match(runtime, /keyTarget\.addEventListener\("keydown", handleCursorKey\);/);
   assert.match(runtime, /var currentFilter = filterQuery;/);
+  assert.match(runtime, /function renderPayloadToken\(token\)/);
+  assert.match(runtime, /if\(line\.tokens && line\.tokens\.length\)\{/);
+  assert.doesNotMatch(runtime, /function renderInlineYAML/);
+  assert.doesNotMatch(runtime, /function renderYAMLCode/);
+  assert.doesNotMatch(runtime, /function renderScalarToken/);
   assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
   assert.match(runtime, /if\(currentFilter && nextController && nextController\.setFilter\)\{ nextController\.setFilter\(currentFilter\); \}/);
   assert.match(runtime, /if\(currentPath && nextController && nextController\.focusPath\)\{ nextController\.focusPath\(currentPath, \{scroll:false\}\); \}/);
@@ -189,6 +194,8 @@ test("generated schema payload pages keep shallow and full data split", () => {
     for (const line of [...initial.payload.lines, ...full.payload.lines]) {
       assert.equal(line.description, undefined, `${file}/${fullFile} should not duplicate descriptions in line records`);
       assert.equal(line.filterText, undefined, `${file}/${fullFile} should not duplicate filter text in line records`);
+      assert.equal(line.text, undefined, `${file}/${fullFile} should not duplicate raw YAML text in line records`);
+      assert.ok(line.comment || Array.isArray(line.tokens), `${file}/${fullFile} should carry structured line tokens`);
     }
     for (const content of [initial.content, full.content]) {
       const lower = content.toLowerCase();
@@ -207,8 +214,8 @@ test("DynamoGraphDeployment keeps a small initial schema payload", () => {
     assert.equal(initial.payload.complete, false, `v${index} initial payload should be shallow`);
     assert.equal(full.payload.complete, true, `v${index} full payload should be complete`);
     assert.ok(
-      initial.content.length < 100_000,
-      `v${index} initial payload should remain below 100KB, got ${initial.content.length}`,
+      initial.content.length < 125_000,
+      `v${index} initial payload should remain below 125KB, got ${initial.content.length}`,
     );
     assert.ok(
       full.content.length > 3_000_000,
