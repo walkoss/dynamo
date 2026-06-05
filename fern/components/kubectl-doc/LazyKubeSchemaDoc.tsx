@@ -54,7 +54,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
   const [isVisible, setIsVisible] = useState(false);
   const schemaGenerationRef = useRef(0);
   const loadingInitialRef = useRef(false);
-  const loadingFullRef = useRef(false);
+  const fullLoadRef = useRef<Promise<KubeSchemaDocument> | null>(null);
 
   useEffect(() => {
     const element = rootRef.current;
@@ -75,7 +75,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     setData(null);
     setError(null);
     loadingInitialRef.current = false;
-    loadingFullRef.current = false;
+    fullLoadRef.current = null;
   }, [name]);
 
   useEffect(() => {
@@ -125,13 +125,12 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     if (!source || data?.complete) {
       return false;
     }
-    if (loadingFullRef.current) {
-      return true;
+    if (fullLoadRef.current) {
+      return fullLoadRef.current;
     }
 
-    loadingFullRef.current = true;
     const generation = schemaGenerationRef.current;
-    fetch(resolveSchemaSource(source))
+    const promise = fetch(resolveSchemaSource(source))
       .then((response) => {
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText}`);
@@ -139,17 +138,26 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
         return response.text();
       })
       .then((payload) => {
-        if (generation === schemaGenerationRef.current) {
-          setData(parseSchemaPayload(payload));
+        const next = parseSchemaPayload(payload);
+        if (generation !== schemaGenerationRef.current) {
+          throw new Error("schema request superseded");
         }
+        setData(next);
+        return next;
       })
       .catch((loadError: unknown) => {
         if (generation === schemaGenerationRef.current) {
-          loadingFullRef.current = false;
           setError(loadError instanceof Error ? loadError.message : String(loadError));
         }
+        throw loadError;
+      })
+      .finally(() => {
+        if (generation === schemaGenerationRef.current) {
+          fullLoadRef.current = null;
+        }
       });
-    return true;
+    fullLoadRef.current = promise;
+    return promise;
   }, [data?.complete, name]);
 
   return (

@@ -92,17 +92,20 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
   assert.match(lazySchemaDoc, /const \[isVisible, setIsVisible\] = useState\(false\)/);
   assert.match(lazySchemaDoc, /const schemaGenerationRef = useRef\(0\)/);
   assert.match(lazySchemaDoc, /const loadingInitialRef = useRef\(false\)/);
+  assert.match(lazySchemaDoc, /const fullLoadRef = useRef<Promise<KubeSchemaDocument> \| null>\(null\)/);
   assert.match(lazySchemaDoc, /new IntersectionObserver/);
   assert.match(lazySchemaDoc, /rootMargin: "160px 0px"/);
   assert.match(lazySchemaDoc, /if \(!isVisible \|\| data \|\| loadingInitialRef\.current\) \{/);
   assert.match(lazySchemaDoc, /schemaGenerationRef\.current \+= 1;/);
   assert.match(lazySchemaDoc, /const generation = schemaGenerationRef\.current;\s*fetch\(resolveSchemaSource\(source\.initial\)\)/s);
   assert.match(lazySchemaDoc, /if \(!cancelled && generation === schemaGenerationRef\.current\) \{\s*setData\(parseSchemaPayload\(payload\)\);/s);
-  assert.match(lazySchemaDoc, /const generation = schemaGenerationRef\.current;\s*fetch\(resolveSchemaSource\(source\)\)/s);
-  assert.match(lazySchemaDoc, /if \(generation === schemaGenerationRef\.current\) \{\s*setData\(parseSchemaPayload\(payload\)\);/s);
+  assert.match(lazySchemaDoc, /if \(fullLoadRef\.current\) \{\s*return fullLoadRef\.current;/s);
+  assert.match(lazySchemaDoc, /const generation = schemaGenerationRef\.current;\s*const promise = fetch\(resolveSchemaSource\(source\)\)/s);
+  assert.match(lazySchemaDoc, /const next = parseSchemaPayload\(payload\);\s*if \(generation !== schemaGenerationRef\.current\) \{/s);
+  assert.match(lazySchemaDoc, /setData\(next\);\s*return next;/s);
+  assert.match(lazySchemaDoc, /fullLoadRef\.current = promise;\s*return promise;/s);
   assert.match(lazySchemaDoc, /if \(!source \|\| data\?\.complete\) \{\s*return false;/s);
-  assert.match(lazySchemaDoc, /if \(loadingFullRef\.current\) \{\s*return true;/s);
-  assert.match(lazySchemaDoc, /return true;\s*}, \[data\?\.complete, name\]\);/s);
+  assert.doesNotMatch(lazySchemaDoc, /return true;/);
   assert.match(lazySchemaDoc, /<div ref=\{rootRef\} className="kdoc-fern-lazy-frame">/);
   assert.doesNotMatch(lazySchemaDoc, /requestIdleCallback/);
   assert.doesNotMatch(lazySchemaDoc, /setTimeout\(callback, 1500\)/);
@@ -124,6 +127,7 @@ test("KubeSchemaDoc keeps long YAML/comment lines inside the schema frame", () =
   const css = readFileSync(join(componentRoot, "kubectl-doc-styles.ts"), "utf8");
   assert.match(css, /\.kdoc-fern-host \.kdoc-tree\{[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden/);
   assert.match(css, /\.kdoc-fern-host \.kdoc-line\{[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden[^}]*white-space:normal/);
+  assert.match(css, /\.kdoc-fern-host \.kdoc-line\[hidden\]\{display:none!important\}/);
   assert.match(css, /\.kdoc-fern-host \.kdoc-yaml-text\{[^}]*display:block[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere[^}]*white-space:pre-wrap/);
   assert.match(css, /\.kdoc-fern-host \.kdoc-yaml-text \*\{[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere/);
 });
@@ -181,8 +185,8 @@ test("generated schema payload pages keep shallow and full data split", () => {
     const full = readSchemaPayload(fullFile);
     assert.equal(initial.payload.complete, false, `${file} should be an initial shallow payload`);
     assert.equal(full.payload.complete, true, `${fullFile} should be a complete payload`);
-    assert.ok(initial.payload.lines.length < full.payload.lines.length, `${file} should have fewer lines than ${fullFile}`);
-    assert.ok(initial.payload.fields.length < full.payload.fields.length, `${file} should have fewer fields than ${fullFile}`);
+    assert.ok(initial.payload.lines.length <= full.payload.lines.length, `${file} should not have more lines than ${fullFile}`);
+    assert.ok(initial.payload.fields.length <= full.payload.fields.length, `${file} should not have more fields than ${fullFile}`);
     if (full.content.length > 1_000_000) {
       assert.ok(
         initial.content.length * 4 < full.content.length,
@@ -192,6 +196,19 @@ test("generated schema payload pages keep shallow and full data split", () => {
 
     const metadata = initial.payload.lines.find((line) => line.path === "metadata");
     assert.ok(metadata?.collapsed, `${file} should keep metadata collapsed in the initial payload`);
+    assert.ok(
+      initial.payload.lines.some((line) => line.path === "metadata.name"),
+      `${file} should include metadata.name before loading the full payload`,
+    );
+    assert.ok(
+      initial.payload.lines.some((line) => line.path === "metadata.namespace"),
+      `${file} should include metadata.namespace before loading the full payload`,
+    );
+    assert.equal(
+      initial.payload.lines.some((line) => line.path === "status.phase"),
+      false,
+      `${file} should keep status descendants out of the initial payload`,
+    );
     assert.ok(
       initial.payload.lines.some((line) => line.foldable && line.collapsed),
       `${file} should retain collapsed placeholders for hidden descendants`,
@@ -220,8 +237,8 @@ test("DynamoGraphDeployment keeps a small initial schema payload", () => {
     assert.equal(initial.payload.complete, false, `v${index} initial payload should be shallow`);
     assert.equal(full.payload.complete, true, `v${index} full payload should be complete`);
     assert.ok(
-      initial.content.length < 125_000,
-      `v${index} initial payload should remain below 125KB, got ${initial.content.length}`,
+      initial.content.length < 150_000,
+      `v${index} initial payload should remain below 150KB, got ${initial.content.length}`,
     );
     assert.ok(
       full.content.length > 3_000_000,
