@@ -41,7 +41,7 @@ mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$P
 echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
 ```
 
-### Install Eksctl CLI ([eksctl installation guide](https://docs.aws.amazon.com/eks/latest/eksctl/installation.html))
+### Install Eksctl CLI ([eksctl installation guide](https://eksctl.io/installation/))
 
 ```bash
 ARCH=amd64
