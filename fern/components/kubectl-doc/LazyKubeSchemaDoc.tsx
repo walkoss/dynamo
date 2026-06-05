@@ -2,9 +2,22 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { schemaSources } from "../kubectl-doc-schemas/sources.generated";
+import { schemaBaseURL, schemaSources } from "./schemaSources.generated";
 import { KubeSchemaDoc } from "./KubeSchemaDoc";
 import type { KubeSchemaDocument } from "./KubeSchemaDoc";
+
+function schemaURL(fileName: string) {
+  return `${schemaBaseURL.replace(/\/$/, "")}/${fileName}`;
+}
+
+function fetchSchema(fileName: string) {
+  return fetch(schemaURL(fileName)).then((response) => {
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<KubeSchemaDocument>;
+  });
+}
 
 export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; filtering?: boolean }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -55,9 +68,18 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
 
     loadingInitialRef.current = true;
     const generation = schemaGenerationRef.current;
-    if (!cancelled && generation === schemaGenerationRef.current) {
-      setData(source.initial);
-    }
+    fetchSchema(source.initial)
+      .then((payload) => {
+        if (!cancelled && generation === schemaGenerationRef.current) {
+          setData(payload);
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (!cancelled && generation === schemaGenerationRef.current) {
+          loadingInitialRef.current = false;
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -65,8 +87,8 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
   }, [data, isVisible, name]);
 
   const loadFull = useCallback(() => {
-    const load = schemaSources[name]?.loadFull;
-    if (!load || data?.complete) {
+    const source = schemaSources[name]?.full;
+    if (!source || data?.complete) {
       return false;
     }
     if (fullLoadRef.current) {
@@ -74,7 +96,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     }
 
     const generation = schemaGenerationRef.current;
-    const promise = load()
+    const promise = fetchSchema(source)
       .then((next) => {
         if (generation !== schemaGenerationRef.current) {
           throw new Error("schema request superseded");

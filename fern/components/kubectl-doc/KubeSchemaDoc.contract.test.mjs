@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../..");
 const componentRoot = here;
-const schemaAssetDir = join(repoRoot, "fern/components/kubectl-doc-schemas");
+const schemaAssetDir = join(repoRoot, "fern/kubectl-doc-schemas");
 const schemaDoc = readFileSync(join(componentRoot, "KubeSchemaDoc.tsx"), "utf8");
 const lazySchemaDoc = readFileSync(join(componentRoot, "LazyKubeSchemaDoc.tsx"), "utf8");
-const generatedSourcesDoc = readFileSync(join(schemaAssetDir, "sources.generated.ts"), "utf8");
+const generatedSourcesDoc = readFileSync(join(componentRoot, "schemaSources.generated.ts"), "utf8");
 
 function readSchemaPayload(fileName) {
   const content = readFileSync(join(schemaAssetDir, fileName), "utf8");
@@ -22,17 +22,10 @@ function readSchemaPayload(fileName) {
 
 function lazySchemaSources() {
   const sources = new Map();
-  const importPattern = /import ([A-Za-z0-9]+)Initial from "\.\/([^"]+\.json)";/g;
-  const initialFiles = new Map();
+  const sourcePattern = /"([^"]+)": \{ initial: "([^"]+\.json)", full: "([^"]+\.json)" \}/g;
   let match;
-  while ((match = importPattern.exec(generatedSourcesDoc)) !== null) {
-    initialFiles.set(match[1], match[2]);
-  }
-
-  const sourcePattern =
-    /"([^"]+)": \{\s*initial: ([A-Za-z0-9]+)Initial as KubeSchemaDocument,\s*loadFull: \(\) => import\("\.\/([^"]+\.json)"\)\.then\(jsonModule\),\s*\}/g;
   while ((match = sourcePattern.exec(generatedSourcesDoc)) !== null) {
-    sources.set(match[1], { initial: initialFiles.get(match[2]), full: match[3] });
+    sources.set(match[1], { initial: match[2], full: match[3] });
   }
   return sources;
 }
@@ -97,34 +90,38 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
 });
 
 test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc and loads JSON assets only", () => {
-  assert.match(lazySchemaDoc, /import \{ schemaSources \} from "\.\.\/kubectl-doc-schemas\/sources\.generated";/);
+  assert.match(lazySchemaDoc, /import \{ schemaBaseURL, schemaSources \} from "\.\/schemaSources\.generated";/);
   assert.match(lazySchemaDoc, /const rootRef = useRef<HTMLDivElement>\(null\)/);
   assert.match(lazySchemaDoc, /const \[isVisible, setIsVisible\] = useState\(false\)/);
   assert.match(lazySchemaDoc, /const schemaGenerationRef = useRef\(0\)/);
   assert.match(lazySchemaDoc, /const loadingInitialRef = useRef\(false\)/);
   assert.match(lazySchemaDoc, /const fullLoadRef = useRef<Promise<KubeSchemaDocument> \| null>\(null\)/);
-  assert.match(generatedSourcesDoc, /import type \{ KubeSchemaDocument \} from "\.\.\/kubectl-doc\/KubeSchemaDoc";/);
-  assert.match(generatedSourcesDoc, /import DynamoGraphDeploymentSchema0Initial from "\.\/dynamo-graph-deployment-schema-0\.json";/);
-  assert.match(generatedSourcesDoc, /loadFull: \(\) => import\("\.\/dynamo-graph-deployment-schema-0-full\.json"\)\.then\(jsonModule\)/);
+  assert.match(generatedSourcesDoc, /export const schemaBaseURL = "https:\/\/raw\.githubusercontent\.com\/ai-dynamo\/dynamo\/main\/fern\/kubectl-doc-schemas";/);
+  assert.match(generatedSourcesDoc, /"DynamoGraphDeploymentSchema0": \{ initial: "dynamo-graph-deployment-schema-0\.json", full: "dynamo-graph-deployment-schema-0-full\.json" \}/);
+  assert.match(lazySchemaDoc, /function schemaURL\(fileName: string\)/);
+  assert.match(lazySchemaDoc, /schemaBaseURL\.replace\(\/\\\/\$\/, ""\)/);
+  assert.match(lazySchemaDoc, /function fetchSchema\(fileName: string\)/);
+  assert.match(lazySchemaDoc, /return response\.json\(\) as Promise<KubeSchemaDocument>;/);
   assert.match(lazySchemaDoc, /new IntersectionObserver/);
   assert.match(lazySchemaDoc, /rootMargin: "160px 0px"/);
   assert.match(lazySchemaDoc, /if \(!isVisible \|\| data \|\| loadingInitialRef\.current\) \{/);
   assert.match(lazySchemaDoc, /schemaGenerationRef\.current \+= 1;/);
-  assert.match(lazySchemaDoc, /if \(!cancelled && generation === schemaGenerationRef\.current\) \{\s*setData\(source\.initial\);/s);
+  assert.match(lazySchemaDoc, /fetchSchema\(source\.initial\)/);
+  assert.match(lazySchemaDoc, /if \(!cancelled && generation === schemaGenerationRef\.current\) \{\s*setData\(payload\);/s);
   assert.match(lazySchemaDoc, /if \(fullLoadRef\.current\) \{\s*return fullLoadRef\.current;/s);
-  assert.match(lazySchemaDoc, /const load = schemaSources\[name\]\?\.loadFull;/);
-  assert.match(lazySchemaDoc, /const promise = load\(\)/);
+  assert.match(lazySchemaDoc, /const source = schemaSources\[name\]\?\.full;/);
+  assert.match(lazySchemaDoc, /const promise = fetchSchema\(source\)/);
   assert.match(lazySchemaDoc, /setData\(next\);\s*return next;/s);
   assert.match(lazySchemaDoc, /fullLoadRef\.current = promise;\s*return promise;/s);
-  assert.match(lazySchemaDoc, /if \(!load \|\| data\?\.complete\) \{\s*return false;/s);
+  assert.match(lazySchemaDoc, /if \(!source \|\| data\?\.complete\) \{\s*return false;/s);
   assert.doesNotMatch(lazySchemaDoc, /return true;/);
   assert.match(lazySchemaDoc, /<div ref=\{rootRef\} className="kdoc-fern-lazy-frame">/);
   assert.doesNotMatch(lazySchemaDoc, /requestIdleCallback/);
   assert.doesNotMatch(lazySchemaDoc, /setTimeout\(callback, 1500\)/);
   assert.match(lazySchemaDoc, /<KubeSchemaDoc data=\{data\} filtering=\{filtering\} onLoadFull=\{loadFull\} \/>/);
   assert.match(lazySchemaDoc, /export default LazyKubeSchemaDoc;/);
-  assert.doesNotMatch(lazySchemaDoc, /parseSchemaPayload|atob|TextDecoder|response\.text|fetchSchema|response\.json|schemaAssetPath|data-kdoc-schema-asset/);
-  assert.doesNotMatch(generatedSourcesDoc, /\.md|kubectl-doc\/schemas|docs\/assets|data-kdoc-schema-asset/);
+  assert.doesNotMatch(lazySchemaDoc, /parseSchemaPayload|atob|TextDecoder|response\.text|schemaAssetPath|data-kdoc-schema-asset/);
+  assert.doesNotMatch(generatedSourcesDoc, /\.md|docs\/assets|data-kdoc-schema-asset|import .*\.json|import\("/);
 
   const resetIndex = lazySchemaDoc.indexOf("useEffect(() => {\n    schemaGenerationRef.current += 1;\n    setData(null);");
   const resetEnd = lazySchemaDoc.indexOf("  }, [name]);", resetIndex);
@@ -304,9 +301,10 @@ test("API reference pages, lazy source map, JSON assets, and Fern asset sync sta
   assert.doesNotMatch(docsIndex, /hidden: true[\s\S]*schema/i);
   assert.match(workflow, /source-checkout\/fern\/components/);
   assert.match(workflow, /docs-checkout\/fern\/components/);
-  assert.doesNotMatch(workflow, /kubectl-doc-schemas/);
+  assert.match(workflow, /RAW_SCHEMA_BASE_URL="https:\/\/raw\.githubusercontent\.com\/\$\{GITHUB_REPOSITORY\}\/\$\{GITHUB_REF_NAME\}\/fern\/kubectl-doc-schemas"/);
+  assert.match(workflow, /schemaSources\.generated\.ts/);
   assert.doesNotMatch(workflow, /generated kubectl-doc JSON schema payloads\.[\s\S]*source-checkout\/docs\/assets/);
-  assert.match(lazySchemaDoc, /setData\(source\.initial\)/);
-  assert.match(lazySchemaDoc, /const promise = load\(\)/);
-  assert.doesNotMatch(lazySchemaDoc, /schemaAssetPath|data-kdoc-schema-asset|fetchSchema/);
+  assert.match(lazySchemaDoc, /fetchSchema\(source\.initial\)/);
+  assert.match(lazySchemaDoc, /const promise = fetchSchema\(source\)/);
+  assert.doesNotMatch(lazySchemaDoc, /schemaAssetPath|data-kdoc-schema-asset/);
 });
