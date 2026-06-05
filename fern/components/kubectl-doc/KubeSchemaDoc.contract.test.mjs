@@ -47,6 +47,8 @@ test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering
   assert.match(schemaDoc, /runtime\.mount\(rootRef\.current, \{/);
   assert.match(schemaDoc, /initialSchema: data/);
   assert.match(schemaDoc, /detailsMode: "side-overlay"/);
+  assert.match(schemaDoc, /wrapControl: false/);
+  assert.match(schemaDoc, /wrapComments: true/);
   assert.match(schemaDoc, /loadFullSchema: loadFullSchema \?\? onLoadFull \?\? defaultLoadFullSchema\(data\)/);
   assert.match(schemaDoc, /controller\?\.destroy\(\);/);
   assert.doesNotMatch(schemaDoc, /useState/);
@@ -71,7 +73,11 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.doesNotMatch(runtime, /function renderInlineYAML/);
   assert.doesNotMatch(runtime, /function renderYAMLCode/);
   assert.doesNotMatch(runtime, /function renderScalarToken/);
+  assert.match(runtime, /function wantsFullSchemaForExpansion\(line\)/);
+  assert.match(runtime, /function expandWithFullSchema\(line\)/);
+  assert.match(runtime, /function toggleExpandedWithFullSchema\(line\)/);
   assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
+  assert.match(runtime, /root\.innerHTML = "";/);
   assert.match(runtime, /if\(currentFilter && nextController && nextController\.setFilter\)\{ nextController\.setFilter\(currentFilter\); \}/);
   assert.match(runtime, /if\(currentPath && nextController && nextController\.focusPath\)\{ nextController\.focusPath\(currentPath, \{scroll:false\}\); \}/);
 
