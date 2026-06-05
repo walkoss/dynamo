@@ -10,19 +10,25 @@ type SchemaSource = {
   full?: string;
 };
 
+const schemaAssetPath = "../../../assets/kubectl-doc/schemas";
+
 const schemaSources: Record<string, SchemaSource> = {
-  "DynamoCheckpointSchema0": { initial: "./dynamo-checkpoint-schema-0.md", full: "./dynamo-checkpoint-schema-0-full.md" },
-  "DynamoComponentDeploymentSchema0": { initial: "./dynamo-component-deployment-schema-0.md", full: "./dynamo-component-deployment-schema-0-full.md" },
-  "DynamoComponentDeploymentSchema1": { initial: "./dynamo-component-deployment-schema-1.md", full: "./dynamo-component-deployment-schema-1-full.md" },
-  "DynamoGraphDeploymentRequestSchema0": { initial: "./dynamo-graph-deployment-request-schema-0.md", full: "./dynamo-graph-deployment-request-schema-0-full.md" },
-  "DynamoGraphDeploymentRequestSchema1": { initial: "./dynamo-graph-deployment-request-schema-1.md", full: "./dynamo-graph-deployment-request-schema-1-full.md" },
-  "DynamoGraphDeploymentScalingAdapterSchema0": { initial: "./dynamo-graph-deployment-scaling-adapter-schema-0.md", full: "./dynamo-graph-deployment-scaling-adapter-schema-0-full.md" },
-  "DynamoGraphDeploymentScalingAdapterSchema1": { initial: "./dynamo-graph-deployment-scaling-adapter-schema-1.md", full: "./dynamo-graph-deployment-scaling-adapter-schema-1-full.md" },
-  "DynamoGraphDeploymentSchema0": { initial: "./dynamo-graph-deployment-schema-0.md", full: "./dynamo-graph-deployment-schema-0-full.md" },
-  "DynamoGraphDeploymentSchema1": { initial: "./dynamo-graph-deployment-schema-1.md", full: "./dynamo-graph-deployment-schema-1-full.md" },
-  "DynamoModelSchema0": { initial: "./dynamo-model-schema-0.md", full: "./dynamo-model-schema-0-full.md" },
-  "DynamoWorkerMetadataSchema0": { initial: "./dynamo-worker-metadata-schema-0.md", full: "./dynamo-worker-metadata-schema-0-full.md" },
+  "DynamoCheckpointSchema0": { initial: "dynamo-checkpoint-schema-0.json", full: "dynamo-checkpoint-schema-0-full.json" },
+  "DynamoComponentDeploymentSchema0": { initial: "dynamo-component-deployment-schema-0.json", full: "dynamo-component-deployment-schema-0-full.json" },
+  "DynamoComponentDeploymentSchema1": { initial: "dynamo-component-deployment-schema-1.json", full: "dynamo-component-deployment-schema-1-full.json" },
+  "DynamoGraphDeploymentRequestSchema0": { initial: "dynamo-graph-deployment-request-schema-0.json", full: "dynamo-graph-deployment-request-schema-0-full.json" },
+  "DynamoGraphDeploymentRequestSchema1": { initial: "dynamo-graph-deployment-request-schema-1.json", full: "dynamo-graph-deployment-request-schema-1-full.json" },
+  "DynamoGraphDeploymentScalingAdapterSchema0": { initial: "dynamo-graph-deployment-scaling-adapter-schema-0.json", full: "dynamo-graph-deployment-scaling-adapter-schema-0-full.json" },
+  "DynamoGraphDeploymentScalingAdapterSchema1": { initial: "dynamo-graph-deployment-scaling-adapter-schema-1.json", full: "dynamo-graph-deployment-scaling-adapter-schema-1-full.json" },
+  "DynamoGraphDeploymentSchema0": { initial: "dynamo-graph-deployment-schema-0.json", full: "dynamo-graph-deployment-schema-0-full.json" },
+  "DynamoGraphDeploymentSchema1": { initial: "dynamo-graph-deployment-schema-1.json", full: "dynamo-graph-deployment-schema-1-full.json" },
+  "DynamoModelSchema0": { initial: "dynamo-model-schema-0.json", full: "dynamo-model-schema-0-full.json" },
+  "DynamoWorkerMetadataSchema0": { initial: "dynamo-worker-metadata-schema-0.json", full: "dynamo-worker-metadata-schema-0-full.json" },
 };
+
+function schemaURL(fileName: string) {
+  return `${schemaAssetPath}/${fileName}`;
+}
 
 function resolveSchemaSource(source: string) {
   if (source.startsWith("http://") || source.startsWith("https://") || source.startsWith("/")) {
@@ -32,19 +38,13 @@ function resolveSchemaSource(source: string) {
   return new URL(source, window.location.href.replace(/\/$/, "")).toString();
 }
 
-function decodeBase64UTF8(value: string) {
-  const bytes = Uint8Array.from(atob(value.replace(/\s+/g, "")), (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
-function parseSchemaPayload(payload: string): KubeSchemaDocument {
-  const encodedMatch = payload.match(/```kubectl-doc-schema\s*([\s\S]*?)\s*```/);
-  if (encodedMatch) {
-    return JSON.parse(decodeBase64UTF8(encodedMatch[1])) as KubeSchemaDocument;
-  }
-
-  const jsonMatch = payload.match(/```json\s*([\s\S]*?)\s*```/);
-  return JSON.parse(jsonMatch ? jsonMatch[1] : payload) as KubeSchemaDocument;
+function fetchSchema(source: string) {
+  return fetch(resolveSchemaSource(source)).then((response) => {
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<KubeSchemaDocument>;
+  });
 }
 
 export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; filtering?: boolean }) {
@@ -96,16 +96,10 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
 
     loadingInitialRef.current = true;
     const generation = schemaGenerationRef.current;
-    fetch(resolveSchemaSource(source.initial))
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        }
-        return response.text();
-      })
+    fetchSchema(schemaURL(source.initial))
       .then((payload) => {
         if (!cancelled && generation === schemaGenerationRef.current) {
-          setData(parseSchemaPayload(payload));
+          setData(payload);
         }
       })
       .catch((loadError: unknown) => {
@@ -130,15 +124,8 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     }
 
     const generation = schemaGenerationRef.current;
-    const promise = fetch(resolveSchemaSource(source))
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}`);
-        }
-        return response.text();
-      })
-      .then((payload) => {
-        const next = parseSchemaPayload(payload);
+    const promise = fetchSchema(schemaURL(source))
+      .then((next) => {
         if (generation !== schemaGenerationRef.current) {
           throw new Error("schema request superseded");
         }

@@ -7,22 +7,21 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../..");
 const componentRoot = here;
+const schemaAssetDir = join(repoRoot, "docs/assets/kubectl-doc/schemas");
 const schemaDoc = readFileSync(join(componentRoot, "KubeSchemaDoc.tsx"), "utf8");
 const lazySchemaDoc = readFileSync(join(componentRoot, "LazyKubeSchemaDoc.tsx"), "utf8");
 
 function readSchemaPayload(fileName) {
-  const content = readFileSync(join(repoRoot, "docs/kubernetes/api-reference/schemas", fileName), "utf8");
-  const match = content.match(/```kubectl-doc-schema\s*([\s\S]*?)\s*```/);
-  assert.ok(match, `${fileName} should contain a kubectl-doc-schema payload`);
+  const content = readFileSync(join(schemaAssetDir, fileName), "utf8");
   return {
     content,
-    payload: JSON.parse(Buffer.from(match[1].replace(/\s+/g, ""), "base64").toString("utf8")),
+    payload: JSON.parse(content),
   };
 }
 
 function lazySchemaSources() {
   const sources = new Map();
-  const sourcePattern = /"([^"]+)": \{ initial: "\.\/([^"]+)", full: "\.\/([^"]+)" \}/g;
+  const sourcePattern = /"([^"]+)": \{ initial: "([^"]+\.json)", full: "([^"]+\.json)" \}/g;
   let match;
   while ((match = sourcePattern.exec(lazySchemaDoc)) !== null) {
     sources.set(match[1], { initial: match[2], full: match[3] });
@@ -51,11 +50,13 @@ test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering
   assert.match(schemaDoc, /wrapComments: true/);
   assert.match(schemaDoc, /loadFullSchema: loadFullSchema \?\? onLoadFull \?\? defaultLoadFullSchema\(data\)/);
   assert.match(schemaDoc, /controller\?\.destroy\(\);/);
+  assert.match(schemaDoc, /return response\.json\(\) as Promise<KubeSchemaDocument>;/);
   assert.doesNotMatch(schemaDoc, /useState/);
   assert.doesNotMatch(schemaDoc, /visibleLines\.map/);
   assert.doesNotMatch(schemaDoc, /data\.lines\.map/);
   assert.doesNotMatch(schemaDoc, /<SchemaLine/);
   assert.doesNotMatch(schemaDoc, /function SchemaLine/);
+  assert.doesNotMatch(schemaDoc, /parseSchemaPayload|atob|TextDecoder|response\.text/);
 });
 
 test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload state behavior", () => {
@@ -87,21 +88,23 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(css, /\.kdoc-fern-host\.kdoc-details-side-overlay \.kdoc-details\{[^}]*position:fixed[^}]*z-index:2147483647/);
 });
 
-test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
+test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc and loads JSON assets only", () => {
   assert.match(lazySchemaDoc, /const rootRef = useRef<HTMLDivElement>\(null\)/);
   assert.match(lazySchemaDoc, /const \[isVisible, setIsVisible\] = useState\(false\)/);
   assert.match(lazySchemaDoc, /const schemaGenerationRef = useRef\(0\)/);
   assert.match(lazySchemaDoc, /const loadingInitialRef = useRef\(false\)/);
   assert.match(lazySchemaDoc, /const fullLoadRef = useRef<Promise<KubeSchemaDocument> \| null>\(null\)/);
+  assert.match(lazySchemaDoc, /const schemaAssetPath = "\.\.\/\.\.\/\.\.\/assets\/kubectl-doc\/schemas";/);
+  assert.match(lazySchemaDoc, /function schemaURL\(fileName: string\)/);
   assert.match(lazySchemaDoc, /new IntersectionObserver/);
   assert.match(lazySchemaDoc, /rootMargin: "160px 0px"/);
   assert.match(lazySchemaDoc, /if \(!isVisible \|\| data \|\| loadingInitialRef\.current\) \{/);
   assert.match(lazySchemaDoc, /schemaGenerationRef\.current \+= 1;/);
-  assert.match(lazySchemaDoc, /const generation = schemaGenerationRef\.current;\s*fetch\(resolveSchemaSource\(source\.initial\)\)/s);
-  assert.match(lazySchemaDoc, /if \(!cancelled && generation === schemaGenerationRef\.current\) \{\s*setData\(parseSchemaPayload\(payload\)\);/s);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\.initial\)\)/);
+  assert.match(lazySchemaDoc, /return response\.json\(\) as Promise<KubeSchemaDocument>;/);
+  assert.match(lazySchemaDoc, /if \(!cancelled && generation === schemaGenerationRef\.current\) \{\s*setData\(payload\);/s);
   assert.match(lazySchemaDoc, /if \(fullLoadRef\.current\) \{\s*return fullLoadRef\.current;/s);
-  assert.match(lazySchemaDoc, /const generation = schemaGenerationRef\.current;\s*const promise = fetch\(resolveSchemaSource\(source\)\)/s);
-  assert.match(lazySchemaDoc, /const next = parseSchemaPayload\(payload\);\s*if \(generation !== schemaGenerationRef\.current\) \{/s);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\)\)/);
   assert.match(lazySchemaDoc, /setData\(next\);\s*return next;/s);
   assert.match(lazySchemaDoc, /fullLoadRef\.current = promise;\s*return promise;/s);
   assert.match(lazySchemaDoc, /if \(!source \|\| data\?\.complete\) \{\s*return false;/s);
@@ -111,6 +114,7 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
   assert.doesNotMatch(lazySchemaDoc, /setTimeout\(callback, 1500\)/);
   assert.match(lazySchemaDoc, /<KubeSchemaDoc data=\{data\} filtering=\{filtering\} onLoadFull=\{loadFull\} \/>/);
   assert.match(lazySchemaDoc, /export default LazyKubeSchemaDoc;/);
+  assert.doesNotMatch(lazySchemaDoc, /parseSchemaPayload|atob|TextDecoder|response\.text/);
 
   const resetIndex = lazySchemaDoc.indexOf("useEffect(() => {\n    schemaGenerationRef.current += 1;\n    setData(null);");
   const resetEnd = lazySchemaDoc.indexOf("  }, [name]);", resetIndex);
@@ -171,15 +175,14 @@ test("schema pages do not wrap the primary tree in a YAML disclosure", () => {
   }
 });
 
-test("generated schema payload pages keep shallow and full data split", () => {
-  const schemaDir = join(repoRoot, "docs/kubernetes/api-reference/schemas");
-  const files = readdirSync(schemaDir).filter((file) => file.endsWith(".md")).sort();
-  const initialFiles = files.filter((file) => !file.endsWith("Full.md"));
+test("generated schema JSON assets keep shallow and full data split", () => {
+  const files = readdirSync(schemaAssetDir).filter((file) => file.endsWith(".json")).sort();
+  const initialFiles = files.filter((file) => !file.endsWith("-full.json"));
 
-  assert.ok(initialFiles.length > 0, "expected generated initial schema payload pages");
+  assert.ok(initialFiles.length > 0, "expected generated initial schema JSON assets");
   for (const file of initialFiles) {
-    const fullFile = file.replace(/\.md$/, "Full.md");
-    assert.ok(files.includes(fullFile), `${file} should have a matching full payload page`);
+    const fullFile = file.replace(/\.json$/, "-full.json");
+    assert.ok(files.includes(fullFile), `${file} should have a matching full JSON asset`);
 
     const initial = readSchemaPayload(file);
     const full = readSchemaPayload(fullFile);
@@ -187,6 +190,10 @@ test("generated schema payload pages keep shallow and full data split", () => {
     assert.equal(full.payload.complete, true, `${fullFile} should be a complete payload`);
     assert.ok(initial.payload.lines.length <= full.payload.lines.length, `${file} should not have more lines than ${fullFile}`);
     assert.ok(initial.payload.fields.length <= full.payload.fields.length, `${file} should not have more fields than ${fullFile}`);
+    assert.ok(
+      initial.payload.fullPayloadURL?.endsWith(`/assets/kubectl-doc/schemas/${fullFile}`),
+      `${file} should point to the matching full JSON asset`,
+    );
     if (full.content.length > 1_000_000) {
       assert.ok(
         initial.content.length * 4 < full.content.length,
@@ -220,20 +227,20 @@ test("generated schema payload pages keep shallow and full data split", () => {
       assert.equal(line.text, undefined, `${file}/${fullFile} should not duplicate raw YAML text in line records`);
       assert.ok(line.comment || Array.isArray(line.tokens), `${file}/${fullFile} should carry structured line tokens`);
     }
+    assert.doesNotMatch(initial.payload.fullPayloadURL ?? "", /^https?:/);
+    assert.doesNotMatch(initial.payload.fullPayloadURL ?? "", /localhost|openapi/i);
     for (const content of [initial.content, full.content]) {
       const lower = content.toLowerCase();
-      assert.equal(lower.includes("localhost"), false, `${file}/${fullFile} should not reference localhost`);
-      assert.equal(lower.includes("/openapi"), false, `${file}/${fullFile} should not reference live OpenAPI`);
-      assert.equal(lower.includes("openapi/v2"), false, `${file}/${fullFile} should not reference OpenAPI v2`);
-      assert.equal(lower.includes("openapi/v3"), false, `${file}/${fullFile} should not reference OpenAPI v3`);
+      assert.equal(content.trimStart().startsWith("{"), true, `${file}/${fullFile} should be raw JSON`);
+      assert.equal(lower.includes("```kubectl-doc-schema"), false, `${file}/${fullFile} should not contain Markdown fences`);
     }
   }
 });
 
 test("DynamoGraphDeployment keeps a small initial schema payload", () => {
   for (const index of [0, 1]) {
-    const initial = readSchemaPayload(`DynamoGraphDeploymentSchema${index}.md`);
-    const full = readSchemaPayload(`DynamoGraphDeploymentSchema${index}Full.md`);
+    const initial = readSchemaPayload(`dynamo-graph-deployment-schema-${index}.json`);
+    const full = readSchemaPayload(`dynamo-graph-deployment-schema-${index}-full.json`);
     assert.equal(initial.payload.complete, false, `v${index} initial payload should be shallow`);
     assert.equal(full.payload.complete, true, `v${index} full payload should be complete`);
     assert.ok(
@@ -241,7 +248,7 @@ test("DynamoGraphDeployment keeps a small initial schema payload", () => {
       `v${index} initial payload should remain below 150KB, got ${initial.content.length}`,
     );
     assert.ok(
-      full.content.length > 3_000_000,
+      full.content.length > 2_000_000,
       `v${index} full payload should keep the complete generated schema, got ${full.content.length}`,
     );
     assert.ok(
@@ -251,10 +258,11 @@ test("DynamoGraphDeployment keeps a small initial schema payload", () => {
   }
 });
 
-test("API reference pages, lazy source map, and hidden routes stay in sync", () => {
+test("API reference pages, lazy source map, JSON assets, and Fern asset sync stay in sync", () => {
   const apiReferenceDir = join(repoRoot, "docs/kubernetes/api-reference");
-  const schemaDir = join(apiReferenceDir, "schemas");
   const docsIndex = readFileSync(join(repoRoot, "docs/index.yml"), "utf8");
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/fern-docs.yml"), "utf8");
+  const files = new Set(readdirSync(schemaAssetDir).filter((file) => file.endsWith(".json")));
   const sources = lazySchemaSources();
   const usedNames = new Set();
 
@@ -270,29 +278,22 @@ test("API reference pages, lazy source map, and hidden routes stay in sync", () 
     const source = sources.get(name);
     assert.ok(source, `${name} should have a LazyKubeSchemaDoc source mapping`);
 
-    const initialFile = `${name}.md`;
-    const fullFile = `${name}Full.md`;
-    assert.ok(readdirSync(schemaDir).includes(initialFile), `${name} should have ${initialFile}`);
-    assert.ok(readdirSync(schemaDir).includes(fullFile), `${name} should have ${fullFile}`);
-    assert.match(
-      docsIndex,
-      new RegExp(`path: kubernetes/api-reference/schemas/${initialFile}`),
-      `${initialFile} should be listed as a hidden Fern page`,
-    );
-    assert.match(
-      docsIndex,
-      new RegExp(`path: kubernetes/api-reference/schemas/${fullFile}`),
-      `${fullFile} should be listed as a hidden Fern page`,
-    );
-
     const slug = slugName(name);
-    assert.equal(source.initial, `${slug}.md`, `${name} initial source should match hidden route slug markdown URL`);
-    assert.equal(source.full, `${slug}-full.md`, `${name} full source should match hidden route slug markdown URL`);
-    assert.match(docsIndex, new RegExp(`slug: ${slug}`), `${name} initial slug should exist in docs index`);
-    assert.match(docsIndex, new RegExp(`slug: ${slug}-full`), `${name} full slug should exist in docs index`);
+    assert.equal(source.initial, `${slug}.json`, `${name} initial source should match its JSON asset name`);
+    assert.equal(source.full, `${slug}-full.json`, `${name} full source should match its JSON asset name`);
+    assert.ok(files.has(source.initial), `${name} should have ${source.initial}`);
+    assert.ok(files.has(source.full), `${name} should have ${source.full}`);
   }
 
   for (const name of sources.keys()) {
     assert.ok(usedNames.has(name), `${name} source mapping should be used by an API reference page`);
   }
+
+  assert.doesNotMatch(docsIndex, /Dynamo[A-Za-z]+Schema\d/);
+  assert.doesNotMatch(docsIndex, /hidden: true[\s\S]*schema/i);
+  assert.match(workflow, /source-checkout\/docs\/assets/);
+  assert.match(workflow, /docs-checkout\/fern\/assets/);
+  assert.match(lazySchemaDoc, /schemaAssetPath = "\.\.\/\.\.\/\.\.\/assets\/kubectl-doc\/schemas"/);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\.initial\)\)/);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\)\)/);
 });
