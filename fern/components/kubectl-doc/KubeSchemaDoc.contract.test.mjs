@@ -39,7 +39,10 @@ function slugName(value) {
 }
 
 test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering schema lines in React", () => {
-  assert.match(schemaDoc, /import "\.\/kubectl-doc\.css";/);
+  assert.match(schemaDoc, /import \{ kubectlDocStyles \} from "\.\/kubectl-doc-styles";/);
+  assert.match(schemaDoc, /const styleElementID = "kubectl-doc-fern-styles";/);
+  assert.match(schemaDoc, /function ensureKubectlDocStyles\(\)/);
+  assert.match(schemaDoc, /style\.textContent = kubectlDocStyles;/);
   assert.match(schemaDoc, /import\("\.\/kubectl-doc-runtime\.js"\)/);
   assert.match(schemaDoc, /runtime\.mount\(rootRef\.current, \{/);
   assert.match(schemaDoc, /initialSchema: data/);
@@ -55,7 +58,7 @@ test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering
 
 test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload state behavior", () => {
   const runtime = readFileSync(join(componentRoot, "kubectl-doc-runtime.js"), "utf8");
-  const css = readFileSync(join(componentRoot, "kubectl-doc.css"), "utf8");
+  const css = readFileSync(join(componentRoot, "kubectl-doc-styles.ts"), "utf8");
 
   assert.match(runtime, /function mount\(root, options\)/);
   assert.match(runtime, /renderSchema\(root, options\.initialSchema, options\);/);
@@ -107,7 +110,7 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
 });
 
 test("KubeSchemaDoc keeps long YAML/comment lines inside the schema frame", () => {
-  const css = readFileSync(join(componentRoot, "kubectl-doc.css"), "utf8");
+  const css = readFileSync(join(componentRoot, "kubectl-doc-styles.ts"), "utf8");
   assert.match(css, /\.kdoc-fern-host \.kdoc-tree\{[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden/);
   assert.match(css, /\.kdoc-fern-host \.kdoc-line\{[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden[^}]*white-space:normal/);
   assert.match(css, /\.kdoc-fern-host \.kdoc-yaml-text\{[^}]*display:block[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere[^}]*white-space:pre-wrap/);
@@ -116,7 +119,7 @@ test("KubeSchemaDoc keeps long YAML/comment lines inside the schema frame", () =
 
 test("KubeSchemaDoc keeps field details as a focused high-z overlay", () => {
   const runtime = readFileSync(join(componentRoot, "kubectl-doc-runtime.js"), "utf8");
-  const css = readFileSync(join(componentRoot, "kubectl-doc.css"), "utf8");
+  const css = readFileSync(join(componentRoot, "kubectl-doc-styles.ts"), "utf8");
   assert.match(runtime, /root\.classList\.add\("kdoc-has-focus"\)/);
   assert.match(runtime, /root\.classList\.remove\("kdoc-has-focus"\)/);
   assert.match(css, /\.kdoc-fern-host\{[^}]*position:relative[^}]*z-index:2147483000/);
