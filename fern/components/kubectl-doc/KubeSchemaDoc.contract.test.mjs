@@ -38,49 +38,39 @@ function slugName(value) {
     .toLowerCase();
 }
 
-test("KubeSchemaDoc gates idle full-payload hydration on viewport visibility", () => {
-  assert.match(schemaDoc, /const \[isVisible, setIsVisible\] = useState\(false\)/);
-  assert.match(schemaDoc, /const dataGenerationRef = useRef\(0\)/);
-  assert.match(schemaDoc, /new IntersectionObserver/);
-  assert.match(schemaDoc, /rootMargin: "160px 0px"/);
-  assert.match(schemaDoc, /activeData\.complete \|\| !isVisible \|\| \(!activeData\.fullPayloadURL && !onLoadFull\)/);
-  assert.match(schemaDoc, /const generation = dataGenerationRef\.current;\s*fetch\(resolveSchemaSource\(activeData\.fullPayloadURL\)\)/s);
-  assert.match(schemaDoc, /if \(generation === dataGenerationRef\.current\) \{\s*setLoadedData\(parseSchemaPayload\(payload\)\);/s);
-  assert.match(schemaDoc, /const handle = idleCallback\(\(\) => loadFull\(\)\)/);
+test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering schema lines in React", () => {
+  assert.match(schemaDoc, /import "\.\/kubectl-doc\.css";/);
+  assert.match(schemaDoc, /import\("\.\/kubectl-doc-runtime\.js"\)/);
+  assert.match(schemaDoc, /runtime\.mount\(rootRef\.current, \{/);
+  assert.match(schemaDoc, /initialSchema: data/);
+  assert.match(schemaDoc, /detailsMode: "side-overlay"/);
+  assert.match(schemaDoc, /loadFullSchema: loadFullSchema \?\? onLoadFull \?\? defaultLoadFullSchema\(data\)/);
+  assert.match(schemaDoc, /controller\?\.destroy\(\);/);
+  assert.doesNotMatch(schemaDoc, /useState/);
+  assert.doesNotMatch(schemaDoc, /visibleLines\.map/);
+  assert.doesNotMatch(schemaDoc, /data\.lines\.map/);
+  assert.doesNotMatch(schemaDoc, /<SchemaLine/);
+  assert.doesNotMatch(schemaDoc, /function SchemaLine/);
 });
 
-test("KubeSchemaDoc hydrates immediately for expand and filter", () => {
-  assert.match(schemaDoc, /const \[hydratingFull, setHydratingFull\] = useState\(false\)/);
-  assert.match(schemaDoc, /if \(activeData\.complete\) \{\s*setHydratingFull\(false\);/s);
-  assert.match(schemaDoc, /if \(onLoadFull\) \{\s*setHydratingFull\(onLoadFull\(\) !== false\);/s);
-  assert.match(schemaDoc, /if \(!activeData\.fullPayloadURL\) \{\s*setHydratingFull\(false\);/s);
-  assert.match(schemaDoc, /if \(loadingFullRef\.current\) \{\s*setHydratingFull\(true\);/s);
-  assert.match(schemaDoc, /setHydratingFull\(false\);\s*console\.error\("kubectl-doc schema failed to load", loadError\);/s);
-  assert.match(schemaDoc, /className="kdoc-fern-filter-loading">loading full schema/);
-  assert.match(schemaDoc, /if \(!activeData\.complete && !lineExpanded\(line, expanded\)\) \{\s*loadFull\(\);/s);
-  assert.match(schemaDoc, /if \(current\?\.foldable && !lineExpanded\(current, expanded\)\) \{\s*if \(!activeData\.complete\) \{\s*loadFull\(\);/s);
-  assert.match(schemaDoc, /if \(filtering && event\.key\.length === 1 && event\.key !== "\/" && !event\.shiftKey\) \{\s*if \(!activeData\.complete\) \{\s*loadFull\(\);/s);
-});
+test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload state behavior", () => {
+  const runtime = readFileSync(join(componentRoot, "kubectl-doc-runtime.js"), "utf8");
+  const css = readFileSync(join(componentRoot, "kubectl-doc.css"), "utf8");
 
-test("KubeSchemaDoc preserves user fold and focus state across full-payload hydration", () => {
-  assert.match(schemaDoc, /setExpanded\(\(current\) => \(\{ \.\.\.initialExpanded\(activeData\.lines\), \.\.\.current \}\)\)/);
-  assert.match(schemaDoc, /setFocusedId\(firstFocusableLine\(activeData\.lines\)\?\.detailId \?\? ""\)/);
-  assert.match(schemaDoc, /if \(!focusableLines\.some\(\(line\) => line\.detailId === focusedId\)\)/);
-  assert.match(schemaDoc, /scrollIntoView\(\{ block: "nearest", inline: "nearest" \}\)/);
-});
+  assert.match(runtime, /function mount\(root, options\)/);
+  assert.match(runtime, /renderSchema\(root, options\.initialSchema, options\);/);
+  assert.match(runtime, /root\.classList\.toggle\("kdoc-details-side-overlay", scopedKeyboard\);/);
+  assert.match(runtime, /var keyTarget = scopedKeyboard \? root : document;/);
+  assert.match(runtime, /keyTarget\.addEventListener\("keydown", handleCursorKey\);/);
+  assert.match(runtime, /var currentFilter = filterQuery;/);
+  assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
+  assert.match(runtime, /if\(currentFilter && nextController && nextController\.setFilter\)\{ nextController\.setFilter\(currentFilter\); \}/);
+  assert.match(runtime, /if\(currentPath && nextController && nextController\.focusPath\)\{ nextController\.focusPath\(currentPath, \{scroll:false\}\); \}/);
 
-test("KubeSchemaDoc filtering uses structured field details instead of duplicated line indexes", () => {
-  assert.doesNotMatch(schemaDoc, /description\?: string;\n\s+depth:/);
-  assert.doesNotMatch(schemaDoc, /filterText\?: string/);
-  assert.match(schemaDoc, /const field = line\.detailId \? fieldsById\.get\(line\.detailId\) : undefined/);
-  assert.match(schemaDoc, /const text = `\$\{line\.field \?\? ""\}\\n\$\{line\.path \?\? ""\}\\n\$\{field\?\.description \?\? ""\}`\.toLowerCase\(\)/);
-});
-
-test("KubeSchemaDoc foldable tab navigation uses line identity, not shared field details", () => {
-  assert.match(schemaDoc, /function previousFoldable[\s\S]*findIndex\(\(line\) => line\.index === current\.index\)/);
-  assert.match(schemaDoc, /function nextFoldable[\s\S]*findIndex\(\(line\) => line\.index === current\.index\)/);
-  assert.doesNotMatch(schemaDoc, /function previousFoldable[\s\S]*findIndex\(\(line\) => line\.detailId === current\.detailId\)/);
-  assert.doesNotMatch(schemaDoc, /function nextFoldable[\s\S]*findIndex\(\(line\) => line\.detailId === current\.detailId\)/);
+  assert.match(css, /\.kdoc-fern-host\{/);
+  assert.match(css, /\.kdoc-fern-host \.kdoc-tree\{[^}]*overflow:hidden/);
+  assert.match(css, /\.kdoc-fern-host\.kdoc-details-side-overlay:not\(\.kdoc-has-focus\) \.kdoc-details\{display:none\}/);
+  assert.match(css, /\.kdoc-fern-host\.kdoc-details-side-overlay \.kdoc-details\{[^}]*position:fixed[^}]*z-index:2147483647/);
 });
 
 test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
@@ -117,34 +107,21 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc", () => {
 });
 
 test("KubeSchemaDoc keeps long YAML/comment lines inside the schema frame", () => {
-  assert.match(
-    schemaDoc,
-    /\.kdoc-fern-tree\{[^}]*contain:inline-size[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden/,
-  );
-  assert.match(
-    schemaDoc,
-    /\.kdoc-fern-line\{[^}]*contain:inline-size[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*inline-size:100%[^}]*overflow:hidden[^}]*white-space:normal/,
-  );
-  assert.match(
-    schemaDoc,
-    /\.kdoc-fern \.kdoc-fern-yaml\{[^}]*display:block[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere!important[^}]*overflow-x:hidden[^}]*white-space:pre-wrap/,
-  );
-  assert.match(
-    schemaDoc,
-    /\.kdoc-fern \.kdoc-fern-yaml \*\{[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere!important[^}]*word-break:break-word/,
-  );
+  const css = readFileSync(join(componentRoot, "kubectl-doc.css"), "utf8");
+  assert.match(css, /\.kdoc-fern-host \.kdoc-tree\{[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden/);
+  assert.match(css, /\.kdoc-fern-host \.kdoc-line\{[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden[^}]*white-space:normal/);
+  assert.match(css, /\.kdoc-fern-host \.kdoc-yaml-text\{[^}]*display:block[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere[^}]*white-space:pre-wrap/);
+  assert.match(css, /\.kdoc-fern-host \.kdoc-yaml-text \*\{[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere/);
 });
 
 test("KubeSchemaDoc keeps field details as a focused high-z overlay", () => {
-  assert.match(schemaDoc, /const showDetails = Boolean\(hasFocus && focusedField\)/);
-  assert.match(schemaDoc, /const treeRect = treeRef\.current\.getBoundingClientRect\(\)/);
-  assert.match(schemaDoc, /const top = Math\.max\(treeRect\.top, headerHeight \+ gap\)/);
-  assert.match(schemaDoc, /const bottom = Math\.min\(treeRect\.bottom, window\.innerHeight - gap\)/);
-  assert.match(schemaDoc, /const left = Math\.min\(Math\.max\(treeRect\.right \+ gap, gap\), window\.innerWidth - width - gap\)/);
-  assert.match(schemaDoc, /visibility: maxHeight >= 120 \? "visible" : "hidden"/);
-  assert.match(schemaDoc, /\.kdoc-fern\{[^}]*position:relative[^}]*z-index:2147483000/);
-  assert.match(schemaDoc, /\.kdoc-fern-details\{[^}]*position:sticky[^}]*z-index:2147483647/);
-  assert.match(schemaDoc, /@media\(min-width:1200px\)\{\.kdoc-fern-details\{[^}]*position:fixed/);
+  const runtime = readFileSync(join(componentRoot, "kubectl-doc-runtime.js"), "utf8");
+  const css = readFileSync(join(componentRoot, "kubectl-doc.css"), "utf8");
+  assert.match(runtime, /root\.classList\.add\("kdoc-has-focus"\)/);
+  assert.match(runtime, /root\.classList\.remove\("kdoc-has-focus"\)/);
+  assert.match(css, /\.kdoc-fern-host\{[^}]*position:relative[^}]*z-index:2147483000/);
+  assert.match(css, /\.kdoc-fern-host\.kdoc-details-side-overlay:not\(\.kdoc-has-focus\) \.kdoc-details\{display:none\}/);
+  assert.match(css, /\.kdoc-fern-host\.kdoc-details-side-overlay \.kdoc-details\{[^}]*position:fixed[^}]*z-index:2147483647/);
 });
 
 test("multi-version API reference pages keep inactive versions behind Fern tabs", () => {
