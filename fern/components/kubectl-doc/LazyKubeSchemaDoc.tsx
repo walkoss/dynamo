@@ -10,6 +10,8 @@ type SchemaSource = {
   full?: string;
 };
 
+type SchemaAssetRole = "initial" | "full";
+
 const schemaAssetPath = "../../../assets/kubectl-doc/schemas";
 
 const schemaSources: Record<string, SchemaSource> = {
@@ -26,7 +28,12 @@ const schemaSources: Record<string, SchemaSource> = {
   "DynamoWorkerMetadataSchema0": { initial: "dynamo-worker-metadata-schema-0.json", full: "dynamo-worker-metadata-schema-0-full.json" },
 };
 
-function schemaURL(fileName: string) {
+function schemaURL(name: string, role: SchemaAssetRole, fileName: string) {
+  const asset = document.querySelector<HTMLAnchorElement>(`a[data-kdoc-schema-asset="${name}:${role}"]`);
+  if (asset?.href) {
+    return asset.href;
+  }
+
   return `${schemaAssetPath}/${fileName}`;
 }
 
@@ -96,7 +103,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
 
     loadingInitialRef.current = true;
     const generation = schemaGenerationRef.current;
-    fetchSchema(schemaURL(source.initial))
+    fetchSchema(schemaURL(name, "initial", source.initial))
       .then((payload) => {
         if (!cancelled && generation === schemaGenerationRef.current) {
           setData(payload);
@@ -124,7 +131,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
     }
 
     const generation = schemaGenerationRef.current;
-    const promise = fetchSchema(schemaURL(source))
+    const promise = fetchSchema(schemaURL(name, "full", source))
       .then((next) => {
         if (generation !== schemaGenerationRef.current) {
           throw new Error("schema request superseded");

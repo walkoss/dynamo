@@ -95,16 +95,18 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc and loads JSON
   assert.match(lazySchemaDoc, /const loadingInitialRef = useRef\(false\)/);
   assert.match(lazySchemaDoc, /const fullLoadRef = useRef<Promise<KubeSchemaDocument> \| null>\(null\)/);
   assert.match(lazySchemaDoc, /const schemaAssetPath = "\.\.\/\.\.\/\.\.\/assets\/kubectl-doc\/schemas";/);
-  assert.match(lazySchemaDoc, /function schemaURL\(fileName: string\)/);
+  assert.match(lazySchemaDoc, /type SchemaAssetRole = "initial" \| "full";/);
+  assert.match(lazySchemaDoc, /function schemaURL\(name: string, role: SchemaAssetRole, fileName: string\)/);
+  assert.match(lazySchemaDoc, /querySelector<HTMLAnchorElement>\(`a\[data-kdoc-schema-asset=/);
   assert.match(lazySchemaDoc, /new IntersectionObserver/);
   assert.match(lazySchemaDoc, /rootMargin: "160px 0px"/);
   assert.match(lazySchemaDoc, /if \(!isVisible \|\| data \|\| loadingInitialRef\.current\) \{/);
   assert.match(lazySchemaDoc, /schemaGenerationRef\.current \+= 1;/);
-  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\.initial\)\)/);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(name, "initial", source\.initial\)\)/);
   assert.match(lazySchemaDoc, /return response\.json\(\) as Promise<KubeSchemaDocument>;/);
   assert.match(lazySchemaDoc, /if \(!cancelled && generation === schemaGenerationRef\.current\) \{\s*setData\(payload\);/s);
   assert.match(lazySchemaDoc, /if \(fullLoadRef\.current\) \{\s*return fullLoadRef\.current;/s);
-  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\)\)/);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(name, "full", source\)\)/);
   assert.match(lazySchemaDoc, /setData\(next\);\s*return next;/s);
   assert.match(lazySchemaDoc, /fullLoadRef\.current = promise;\s*return promise;/s);
   assert.match(lazySchemaDoc, /if \(!source \|\| data\?\.complete\) \{\s*return false;/s);
@@ -285,6 +287,25 @@ test("API reference pages, lazy source map, JSON assets, and Fern asset sync sta
     assert.ok(files.has(source.full), `${name} should have ${source.full}`);
   }
 
+  for (const page of readdirSync(apiReferenceDir).filter((file) => file.endsWith(".mdx")).sort()) {
+    const content = readFileSync(join(apiReferenceDir, page), "utf8");
+    for (const match of content.matchAll(/<LazyKubeSchemaDoc name=\{"([^"]+)"\} \/>/g)) {
+      const name = match[1];
+      const source = sources.get(name);
+      assert.ok(source, `${page}/${name} should have a source mapping`);
+      assert.match(
+        content,
+        new RegExp(`data-kdoc-schema-asset="${name}:initial" href="\.\.\/\.\.\/assets\/kubectl-doc\/schemas\/${source.initial}"`),
+        `${page}/${name} should reference its initial JSON asset in MDX`,
+      );
+      assert.match(
+        content,
+        new RegExp(`data-kdoc-schema-asset="${name}:full" href="\.\.\/\.\.\/assets\/kubectl-doc\/schemas\/${source.full}"`),
+        `${page}/${name} should reference its full JSON asset in MDX`,
+      );
+    }
+  }
+
   for (const name of sources.keys()) {
     assert.ok(usedNames.has(name), `${name} source mapping should be used by an API reference page`);
   }
@@ -294,6 +315,6 @@ test("API reference pages, lazy source map, JSON assets, and Fern asset sync sta
   assert.match(workflow, /source-checkout\/docs\/assets/);
   assert.match(workflow, /docs-checkout\/fern\/assets/);
   assert.match(lazySchemaDoc, /schemaAssetPath = "\.\.\/\.\.\/\.\.\/assets\/kubectl-doc\/schemas"/);
-  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\.initial\)\)/);
-  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(source\)\)/);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(name, "initial", source\.initial\)\)/);
+  assert.match(lazySchemaDoc, /fetchSchema\(schemaURL\(name, "full", source\)\)/);
 });
