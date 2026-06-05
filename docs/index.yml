@@ -22,16 +22,36 @@ navigation:
     contents:
       - page: Quickstart
         path: getting-started/quickstart.mdx
+      - page: Quickstart (Simplified Chinese)
+        path: getting-started/quickstart.zh-CN.mdx
+        slug: quickstart-zh-cn
+        hidden: true
       - page: Introduction
         path: getting-started/introduction.md
+      - page: Introduction (Simplified Chinese)
+        path: getting-started/introduction.zh-CN.md
+        slug: introduction-zh-cn
+        hidden: true
       - page: Local Installation
         path: getting-started/local-installation.md
+      - page: Local Installation (Simplified Chinese)
+        path: getting-started/local-installation.zh-CN.md
+        slug: local-installation-zh-cn
+        hidden: true
       - page: Building from Source
         path: getting-started/building-from-source.md
+      - page: Building from Source (Simplified Chinese)
+        path: getting-started/building-from-source.zh-CN.md
+        slug: building-from-source-zh-cn
+        hidden: true
       - page: Kubernetes Deployment
         path: getting-started/kubernetes-deployment.md
       - page: Contribution Guide
         path: contribution-guide.md
+      - page: Contribution Guide (Simplified Chinese)
+        path: contribution-guide.zh-CN.md
+        slug: contribution-guide-zh-cn
+        hidden: true
 
   # ==================== Resources ====================
   - section: Resources
@@ -189,6 +209,10 @@ navigation:
         contents:
           - page: Tool Call Parsing (Dynamo)
             path: tool-calling/README.md
+          - page: Tool Call Parsing (Dynamo, Simplified Chinese)
+            path: tool-calling/README.zh-CN.md
+            slug: tool-call-parsing-dynamo-zh-cn
+            hidden: true
           - page: Reasoning Parsing (Dynamo)
             path: reasoning/README.md
           - page: Parser Engine Fallback
@@ -202,6 +226,10 @@ navigation:
         contents:
           - page: Request Migration
             path: fault-tolerance/request-migration.md
+          - page: Request Migration (Simplified Chinese)
+            path: fault-tolerance/request-migration.zh-CN.md
+            slug: request-migration-zh-cn
+            hidden: true
           - page: Request Cancellation
             path: fault-tolerance/request-cancellation.md
           - page: Request Rejection
@@ -346,6 +374,10 @@ navigation:
       - section: Router
         path: components/router/README.md
         contents:
+          - page: Router Overview (Simplified Chinese)
+            path: components/router/README.zh-CN.md
+            slug: overview-zh-cn
+            hidden: true
           - page: Routing Concepts
             path: components/router/router-concepts.md
           - page: Configuration and Tuning
@@ -369,6 +401,10 @@ navigation:
         contents:
           - page: Planner Guide
             path: components/planner/planner-guide.md
+          - page: Planner Guide (Simplified Chinese)
+            path: components/planner/planner-guide.zh-CN.md
+            slug: planner-guide-zh-cn
+            hidden: true
           - page: Global Planner Guide
             path: components/planner/global-planner.md
           - page: Planner Examples
@@ -382,6 +418,10 @@ navigation:
             path: components/profiler/profiler-examples.md
       - page: KVBM
         path: components/kvbm/README.md
+      - page: KVBM (Simplified Chinese)
+        path: components/kvbm/README.zh-CN.md
+        slug: kvbm-zh-cn
+        hidden: true
 
   # ==================== Integrations ====================
   - section: Integrations
@@ -409,10 +449,18 @@ navigation:
     contents:
       - page: Overall Architecture
         path: design-docs/architecture.md
+      - page: Overall Architecture (Simplified Chinese)
+        path: design-docs/architecture.zh-CN.md
+        slug: overall-architecture-zh-cn
+        hidden: true
       - page: Architecture Flow
         path: design-docs/dynamo-flow.md
       - page: Disaggregated Serving
         path: design-docs/disagg-serving.md
+      - page: Disaggregated Serving (Simplified Chinese)
+        path: design-docs/disagg-serving.zh-CN.md
+        slug: disaggregated-serving-zh-cn
+        hidden: true
       - page: Distributed Runtime
         path: design-docs/distributed-runtime.md
       - section: Communication Planes

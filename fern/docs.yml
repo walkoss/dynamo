@@ -42,6 +42,9 @@ redirects:
     destination: "/dynamo/dev/"
   - source: "/dynamo/latest/index.html"
     destination: "/dynamo/"
+  # Preserve the source-file URL exposed by the old language switcher.
+  - source: "/dynamo/design-docs/architecture.zh-CN.md"
+    destination: "/dynamo/dev/design-docs/overall-architecture-zh-cn"
   - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/python"
     destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
   - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/rust"
