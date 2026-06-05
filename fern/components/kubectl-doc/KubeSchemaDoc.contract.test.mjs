@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../..");
 const componentRoot = here;
-const schemaAssetDir = join(repoRoot, "fern/kubectl-doc-schemas");
+const schemaAssetDir = join(repoRoot, "fern/components/kubectl-doc-schemas");
 const schemaDoc = readFileSync(join(componentRoot, "KubeSchemaDoc.tsx"), "utf8");
 const lazySchemaDoc = readFileSync(join(componentRoot, "LazyKubeSchemaDoc.tsx"), "utf8");
 const generatedSourcesDoc = readFileSync(join(schemaAssetDir, "sources.generated.ts"), "utf8");
@@ -97,13 +97,13 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
 });
 
 test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc and loads JSON assets only", () => {
-  assert.match(lazySchemaDoc, /import \{ schemaSources \} from "\.\.\/\.\.\/kubectl-doc-schemas\/sources\.generated";/);
+  assert.match(lazySchemaDoc, /import \{ schemaSources \} from "\.\.\/kubectl-doc-schemas\/sources\.generated";/);
   assert.match(lazySchemaDoc, /const rootRef = useRef<HTMLDivElement>\(null\)/);
   assert.match(lazySchemaDoc, /const \[isVisible, setIsVisible\] = useState\(false\)/);
   assert.match(lazySchemaDoc, /const schemaGenerationRef = useRef\(0\)/);
   assert.match(lazySchemaDoc, /const loadingInitialRef = useRef\(false\)/);
   assert.match(lazySchemaDoc, /const fullLoadRef = useRef<Promise<KubeSchemaDocument> \| null>\(null\)/);
-  assert.match(generatedSourcesDoc, /import type \{ KubeSchemaDocument \} from "\.\.\/components\/kubectl-doc\/KubeSchemaDoc";/);
+  assert.match(generatedSourcesDoc, /import type \{ KubeSchemaDocument \} from "\.\.\/kubectl-doc\/KubeSchemaDoc";/);
   assert.match(generatedSourcesDoc, /import DynamoGraphDeploymentSchema0Initial from "\.\/dynamo-graph-deployment-schema-0\.json";/);
   assert.match(generatedSourcesDoc, /loadFull: \(\) => import\("\.\/dynamo-graph-deployment-schema-0-full\.json"\)\.then\(jsonModule\)/);
   assert.match(lazySchemaDoc, /new IntersectionObserver/);
@@ -302,8 +302,9 @@ test("API reference pages, lazy source map, JSON assets, and Fern asset sync sta
 
   assert.doesNotMatch(docsIndex, /Dynamo[A-Za-z]+Schema\d/);
   assert.doesNotMatch(docsIndex, /hidden: true[\s\S]*schema/i);
-  assert.match(workflow, /source-checkout\/fern\/kubectl-doc-schemas/);
-  assert.match(workflow, /docs-checkout\/fern\/kubectl-doc-schemas/);
+  assert.match(workflow, /source-checkout\/fern\/components/);
+  assert.match(workflow, /docs-checkout\/fern\/components/);
+  assert.doesNotMatch(workflow, /kubectl-doc-schemas/);
   assert.doesNotMatch(workflow, /generated kubectl-doc JSON schema payloads\.[\s\S]*source-checkout\/docs\/assets/);
   assert.match(lazySchemaDoc, /setData\(source\.initial\)/);
   assert.match(lazySchemaDoc, /const promise = load\(\)/);

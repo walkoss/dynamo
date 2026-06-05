@@ -153,13 +153,6 @@ jobs:
             cp -r source-checkout/fern/components docs-checkout/fern/components
           fi
 
-          # Sync generated kubectl-doc JSON schema payloads imported by the Fern component.
-          if [ -d source-checkout/fern/kubectl-doc-schemas ]; then
-            echo "Syncing kubectl-doc-schemas/ to docs-website branch..."
-            rm -rf docs-checkout/fern/kubectl-doc-schemas
-            cp -r source-checkout/fern/kubectl-doc-schemas docs-checkout/fern/kubectl-doc-schemas
-          fi
-
           # Sync static assets used directly by documentation pages.
           if [ -d source-checkout/docs/assets ]; then
             echo "Syncing assets/ to docs-website branch..."

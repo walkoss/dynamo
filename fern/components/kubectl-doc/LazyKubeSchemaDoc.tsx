@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { schemaSources } from "../../kubectl-doc-schemas/sources.generated";
+import { schemaSources } from "../kubectl-doc-schemas/sources.generated";
 import { KubeSchemaDoc } from "./KubeSchemaDoc";
 import type { KubeSchemaDocument } from "./KubeSchemaDoc";
 

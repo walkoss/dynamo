@@ -1,4 +1,4 @@
-import type { KubeSchemaDocument } from "../components/kubectl-doc/KubeSchemaDoc";
+import type { KubeSchemaDocument } from "../kubectl-doc/KubeSchemaDoc";
 
 import DynamoCheckpointSchema0Initial from "./dynamo-checkpoint-schema-0.json";
 import DynamoComponentDeploymentSchema0Initial from "./dynamo-component-deployment-schema-0.json";
