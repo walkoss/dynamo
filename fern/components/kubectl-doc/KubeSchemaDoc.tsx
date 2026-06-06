@@ -54,7 +54,7 @@ export type KubeSchemaDocument = {
   fields: KubeSchemaField[];
 };
 
-type KubectlDocController = {
+export type KubectlDocController = {
   destroy: () => void;
   focusPath?: (path: string, options?: { scroll?: boolean }) => boolean;
   expandPath?: (path: string) => boolean;
@@ -64,7 +64,7 @@ type KubectlDocController = {
   snapshot?: () => KubectlDocSnapshot;
 };
 
-type KubectlDocSnapshot = {
+export type KubectlDocSnapshot = {
   currentPath: string;
   filter: string;
   folds?: Array<{ path: string; expanded: boolean }>;
@@ -74,7 +74,7 @@ type KubectlDocHost = HTMLDivElement & {
   __kubectlDocController?: KubectlDocController | null;
 };
 
-type KubectlDocRuntime = {
+export type KubectlDocRuntime = {
   mount: (
     root: HTMLElement,
     options: {
@@ -94,18 +94,24 @@ declare global {
   }
 }
 
-type KubeSchemaDocProps = {
+export type KubeSchemaDocProps = {
   data: KubeSchemaDocument;
   filtering?: boolean;
   loadFullSchema?: () => Promise<KubeSchemaDocument> | KubeSchemaDocument | false | void;
-  onLoadFull?: () => Promise<KubeSchemaDocument> | KubeSchemaDocument | false | void;
+  detailsMode?: "inline-side" | "side-overlay";
+  wrapControl?: boolean;
+  wrapComments?: boolean;
+  className?: string;
+  injectStyles?: boolean;
+  styleElementID?: string;
+  runtimeLoader?: () => Promise<KubectlDocRuntime> | KubectlDocRuntime;
 };
 
 let runtimePromise: Promise<KubectlDocRuntime> | null = null;
 const fullSchemaCache = new Map<string, Promise<KubeSchemaDocument> | KubeSchemaDocument>();
-const styleElementID = "kubectl-doc-fern-styles";
+const defaultStyleElementID = "kubectl-doc-react-styles";
 
-function ensureKubectlDocStyles() {
+function ensureKubectlDocStyles(styleElementID: string) {
   if (typeof document === "undefined" || document.getElementById(styleElementID)) {
     return;
   }
@@ -116,13 +122,7 @@ function ensureKubectlDocStyles() {
   document.head.appendChild(style);
 }
 
-function ensureKubectlDocRuntime() {
-  if (typeof window === "undefined") {
-    return Promise.reject(new Error("kubectl-doc runtime is only available in the browser"));
-  }
-  if (window.KubectlDoc) {
-    return Promise.resolve(window.KubectlDoc);
-  }
+function defaultRuntimeLoader() {
   if (!runtimePromise) {
     runtimePromise = import("./kubectl-doc-runtime.js").then(() => {
       if (!window.KubectlDoc) {
@@ -132,6 +132,21 @@ function ensureKubectlDocRuntime() {
     });
   }
   return runtimePromise;
+}
+
+function ensureKubectlDocRuntime(runtimeLoader?: () => Promise<KubectlDocRuntime> | KubectlDocRuntime) {
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("kubectl-doc runtime is only available in the browser"));
+  }
+  if (window.KubectlDoc) {
+    return Promise.resolve(window.KubectlDoc);
+  }
+  return Promise.resolve(runtimeLoader ? runtimeLoader() : defaultRuntimeLoader()).then((runtime) => {
+    if (!runtime) {
+      throw new Error("kubectl-doc runtime loader did not return a runtime");
+    }
+    return runtime;
+  });
 }
 
 function resolveSchemaSource(source: string) {
@@ -197,7 +212,22 @@ function restoreSnapshot(controller: KubectlDocController, snapshot: KubectlDocS
   }
 }
 
-export function KubeSchemaDoc({ data, filtering = true, loadFullSchema, onLoadFull }: KubeSchemaDocProps) {
+function classNames(...values: Array<string | undefined>) {
+  return values.filter(Boolean).join(" ");
+}
+
+export function KubeSchemaDoc({
+  data,
+  filtering = true,
+  loadFullSchema,
+  detailsMode = "side-overlay",
+  wrapControl = false,
+  wrapComments = true,
+  className,
+  injectStyles = true,
+  styleElementID = defaultStyleElementID,
+  runtimeLoader,
+}: KubeSchemaDocProps) {
   const rootRef = useRef<KubectlDocHost | null>(null);
   const snapshotRef = useRef<KubectlDocSnapshot | null>(null);
 
@@ -205,8 +235,10 @@ export function KubeSchemaDoc({ data, filtering = true, loadFullSchema, onLoadFu
     let cancelled = false;
     let controller: KubectlDocController | undefined;
 
-    ensureKubectlDocStyles();
-    ensureKubectlDocRuntime()
+    if (injectStyles) {
+      ensureKubectlDocStyles(styleElementID);
+    }
+    ensureKubectlDocRuntime(runtimeLoader)
       .then((runtime) => {
         if (cancelled || !rootRef.current) {
           return;
@@ -217,10 +249,10 @@ export function KubeSchemaDoc({ data, filtering = true, loadFullSchema, onLoadFu
         controller = runtime.mount(rootRef.current, {
           initialSchema: data,
           filtering,
-          detailsMode: "side-overlay",
-          wrapControl: false,
-          wrapComments: true,
-          loadFullSchema: loadFullSchema ?? onLoadFull ?? defaultLoadFullSchema(data),
+          detailsMode,
+          wrapControl,
+          wrapComments,
+          loadFullSchema: loadFullSchema ?? defaultLoadFullSchema(data),
         });
         restoreSnapshot(controller, previousSnapshot);
       })
@@ -234,9 +266,19 @@ export function KubeSchemaDoc({ data, filtering = true, loadFullSchema, onLoadFu
       snapshotRef.current = mountedController?.snapshot?.() ?? null;
       mountedController?.destroy();
     };
-  }, [data, filtering, loadFullSchema, onLoadFull]);
+  }, [
+    data,
+    filtering,
+    loadFullSchema,
+    detailsMode,
+    wrapControl,
+    wrapComments,
+    injectStyles,
+    styleElementID,
+    runtimeLoader,
+  ]);
 
-  return <div ref={rootRef} className="kubectl-doc kdoc-fern-host" />;
+  return <div ref={rootRef} className={classNames("kubectl-doc", "kdoc-react-host", className)} />;
 }
 
 export default KubeSchemaDoc;

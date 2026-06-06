@@ -120,7 +120,7 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
       {error ? (
         <div className="kdoc-fern-lazy kdoc-fern-lazy-error">Schema failed to load: {error}</div>
       ) : data ? (
-        <KubeSchemaDoc data={data} filtering={filtering} onLoadFull={loadFull} />
+        <KubeSchemaDoc data={data} filtering={filtering} loadFullSchema={loadFull} />
       ) : (
         <div className="kdoc-fern-lazy">Loading schema...</div>
       )}
