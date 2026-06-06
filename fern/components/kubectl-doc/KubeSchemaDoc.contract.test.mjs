@@ -50,7 +50,13 @@ test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering
   assert.match(schemaDoc, /wrapControl: false/);
   assert.match(schemaDoc, /wrapComments: true/);
   assert.match(schemaDoc, /loadFullSchema: loadFullSchema \?\? onLoadFull \?\? defaultLoadFullSchema\(data\)/);
-  assert.match(schemaDoc, /controller\?\.destroy\(\);/);
+  assert.match(schemaDoc, /const fullSchemaCache = new Map<string, Promise<KubeSchemaDocument> \| KubeSchemaDocument>\(\);/);
+  assert.match(schemaDoc, /fullSchemaCache\.get\(source\)/);
+  assert.match(schemaDoc, /fullSchemaCache\.set\(source, request\)/);
+  assert.match(schemaDoc, /function activeController\(root: KubectlDocHost \| null, fallback\?: KubectlDocController\)/);
+  assert.match(schemaDoc, /restoreSnapshot\(controller, previousSnapshot\);/);
+  assert.match(schemaDoc, /snapshotRef\.current = mountedController\?\.snapshot\?\.\(\) \?\? null;/);
+  assert.match(schemaDoc, /mountedController\?\.destroy\(\);/);
   assert.match(schemaDoc, /return response\.json\(\) as Promise<KubeSchemaDocument>;/);
   assert.doesNotMatch(schemaDoc, /useState/);
   assert.doesNotMatch(schemaDoc, /visibleLines\.map/);
@@ -79,9 +85,12 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /function expandWithFullSchema\(line\)/);
   assert.match(runtime, /function toggleExpandedWithFullSchema\(line\)/);
   assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
+  assert.match(runtime, /function restoreFoldSnapshot\(targetController, foldStates\)/);
+  assert.match(runtime, /function handleFocusIn\(\)\{\s*root\.classList\.add\("kdoc-has-focus"\);\s*requestFullSchema\(\);/s);
   assert.match(runtime, /root\.innerHTML = "";/);
   assert.match(runtime, /if\(currentFilter && nextController && nextController\.setFilter\)\{ nextController\.setFilter\(currentFilter\); \}/);
   assert.match(runtime, /if\(currentPath && nextController && nextController\.focusPath\)\{ nextController\.focusPath\(currentPath, \{scroll:false\}\); \}/);
+  assert.match(runtime, /folds: foldSnapshot\(\)/);
 
   assert.match(css, /\.kdoc-fern-host\{/);
   assert.match(css, /\.kdoc-fern-host \.kdoc-tree\{[^}]*overflow:hidden/);
@@ -112,7 +121,9 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc and loads JSON
   assert.match(lazySchemaDoc, /const source = schemaSources\[name\]\?\.full;/);
   assert.match(lazySchemaDoc, /const promise = fetchSchema\(source\)/);
   assert.match(lazySchemaDoc, /setData\(next\);\s*return next;/s);
+  assert.match(lazySchemaDoc, /setError\(loadError instanceof Error \? loadError\.message : String\(loadError\)\);\s*fullLoadRef\.current = null;/s);
   assert.match(lazySchemaDoc, /fullLoadRef\.current = promise;\s*return promise;/s);
+  assert.doesNotMatch(lazySchemaDoc, /finally\(\(\) => \{\s*if \(generation === schemaGenerationRef\.current\) \{\s*fullLoadRef\.current = null;/s);
   assert.match(lazySchemaDoc, /if \(!source \|\| data\?\.complete\) \{\s*return false;/s);
   assert.doesNotMatch(lazySchemaDoc, /return true;/);
   assert.match(lazySchemaDoc, /<div ref=\{rootRef\} className="kdoc-fern-lazy-frame">/);

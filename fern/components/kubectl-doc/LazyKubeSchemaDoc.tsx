@@ -107,13 +107,9 @@ export function LazyKubeSchemaDoc({ name, filtering = true }: { name: string; fi
       .catch((loadError: unknown) => {
         if (generation === schemaGenerationRef.current) {
           setError(loadError instanceof Error ? loadError.message : String(loadError));
-        }
-        throw loadError;
-      })
-      .finally(() => {
-        if (generation === schemaGenerationRef.current) {
           fullLoadRef.current = null;
         }
+        throw loadError;
       });
     fullLoadRef.current = promise;
     return promise;
