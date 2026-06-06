@@ -86,11 +86,16 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /function toggleExpandedWithFullSchema\(line\)/);
   assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
   assert.match(runtime, /function restoreFoldSnapshot\(targetController, foldStates\)/);
-  assert.match(runtime, /function handleFocusIn\(\)\{\s*root\.classList\.add\("kdoc-has-focus"\);\s*requestFullSchema\(\);/s);
+  assert.match(runtime, /function hostHasFocus\(\)/);
+  assert.match(runtime, /var hadFocus = hostHasFocus\(\);/);
+  assert.match(runtime, /if\(hadFocus && nextController && nextController\.setFocused\)\{ nextController\.setFocused\(true\); \}/);
+  assert.match(runtime, /function handleFocusIn\(\)\{\s*markHostFocused\(\);\s*requestFullSchema\(\);/s);
   assert.match(runtime, /root\.innerHTML = "";/);
   assert.match(runtime, /if\(currentFilter && nextController && nextController\.setFilter\)\{ nextController\.setFilter\(currentFilter\); \}/);
   assert.match(runtime, /if\(currentPath && nextController && nextController\.focusPath\)\{ nextController\.focusPath\(currentPath, \{scroll:false\}\); \}/);
   assert.match(runtime, /folds: foldSnapshot\(\)/);
+  assert.match(runtime, /hasFocus: hostHasFocus\(\)/);
+  assert.match(runtime, /setFocused: function\(value\)/);
 
   assert.match(css, /\.kdoc-react-host\{/);
   assert.match(css, /\.kdoc-react-host \.kdoc-tree\{[^}]*overflow:hidden/);
