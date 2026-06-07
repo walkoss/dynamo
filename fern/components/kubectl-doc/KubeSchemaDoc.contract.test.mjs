@@ -49,6 +49,8 @@ test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering
   assert.match(schemaDoc, /detailsMode,/);
   assert.match(schemaDoc, /wrapControl,/);
   assert.match(schemaDoc, /wrapComments,/);
+  assert.match(schemaDoc, /preloadFullSchema = true/);
+  assert.match(schemaDoc, /preloadFullSchema,/);
   assert.match(schemaDoc, /loadFullSchema: loadFullSchema \?\? defaultLoadFullSchema\(data\)/);
   assert.match(schemaDoc, /const fullSchemaCache = new Map<string, Promise<KubeSchemaDocument> \| KubeSchemaDocument>\(\);/);
   assert.match(schemaDoc, /fullSchemaCache\.get\(source\)/);
@@ -85,6 +87,11 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /function wantsFullProjectionForExpansion\(line\)/);
   assert.match(runtime, /function expandWithFullSchema\(line\)/);
   assert.match(runtime, /function toggleExpandedWithFullSchema\(line\)/);
+  assert.match(runtime, /function scheduleFullSchemaPreload\(\)/);
+  assert.match(runtime, /if\(mountedOptions\.preloadFullSchema === false \|\| fullSchema \|\| loadingFullSchema \|\| !mountedOptions\.loadFullSchema\)\{ return; \}/);
+  assert.match(runtime, /requestFullSchema\(\);/);
+  assert.match(runtime, /scheduleFullSchemaPreload\(\);/);
+  assert.match(runtime, /function cancelFullSchemaPreload\(\)/);
   assert.match(runtime, /requestFullSchema\(function\(\)\{ renderFullFoldProjection\(path, true\); \}\);/);
   assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
   assert.match(runtime, /function restoreFoldSnapshot\(targetController, foldStates\)/);
