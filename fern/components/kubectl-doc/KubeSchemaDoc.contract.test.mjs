@@ -73,34 +73,35 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /function mount\(root, options\)/);
   assert.match(runtime, /renderSchema\(root, options\.initialSchema, options\);/);
   assert.match(runtime, /root\.classList\.toggle\("kdoc-details-side-overlay", scopedKeyboard\);/);
-  assert.match(runtime, /var keyTarget = scopedKeyboard \? root : document;/);
+  assert.match(runtime, /if\(scopedKeyboard && !hostHasFocus\(\)\)\{ return false; \}/);
+  assert.match(runtime, /var keyTarget = document;/);
   assert.match(runtime, /keyTarget\.addEventListener\("keydown", handleCursorKey\);/);
-  assert.match(runtime, /var currentFilter = filterQuery;/);
+  assert.match(runtime, /filter: filterQuery/);
   assert.match(runtime, /function renderPayloadToken\(token\)/);
   assert.match(runtime, /if\(line\.tokens && line\.tokens\.length\)\{/);
   assert.doesNotMatch(runtime, /function renderInlineYAML/);
   assert.doesNotMatch(runtime, /function renderYAMLCode/);
   assert.doesNotMatch(runtime, /function renderScalarToken/);
-  assert.match(runtime, /function wantsFullSchemaForExpansion\(line\)/);
+  assert.match(runtime, /function wantsFullProjectionForExpansion\(line\)/);
   assert.match(runtime, /function expandWithFullSchema\(line\)/);
   assert.match(runtime, /function toggleExpandedWithFullSchema\(line\)/);
+  assert.match(runtime, /requestFullSchema\(function\(\)\{ renderFullFoldProjection\(path, true\); \}\);/);
   assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
   assert.match(runtime, /function restoreFoldSnapshot\(targetController, foldStates\)/);
   assert.match(runtime, /function hostHasFocus\(\)/);
-  assert.match(runtime, /var hadFocus = hostHasFocus\(\);/);
-  assert.match(runtime, /if\(hadFocus && nextController && nextController\.setFocused\)\{ nextController\.setFocused\(true\); \}/);
+  assert.match(schemaDoc, /if \(snapshot\.hasFocus\) \{\s*controller\.setFocused\?\.\(true\);/s);
   assert.match(runtime, /function handleFocusIn\(\)\{\s*markHostFocused\(\);\s*requestFullSchema\(\);/s);
-  assert.match(runtime, /root\.innerHTML = "";/);
-  assert.match(runtime, /if\(currentFilter && nextController && nextController\.setFilter\)\{ nextController\.setFilter\(currentFilter\); \}/);
-  assert.match(runtime, /if\(currentPath && nextController && nextController\.focusPath\)\{ nextController\.focusPath\(currentPath, \{scroll:false\}\); \}/);
+  assert.match(schemaDoc, /rootRef\.current\.innerHTML = "";/);
+  assert.match(schemaDoc, /if \(snapshot\.filter\) \{\s*controller\.setFilter\?\.\(snapshot\.filter\);/s);
+  assert.match(schemaDoc, /if \(snapshot\.currentPath\) \{\s*controller\.focusPath\?\.\(snapshot\.currentPath, \{ scroll: false \}\);/s);
   assert.match(runtime, /folds: foldSnapshot\(\)/);
   assert.match(runtime, /hasFocus: hostHasFocus\(\)/);
   assert.match(runtime, /setFocused: function\(value\)/);
 
-  assert.match(css, /\.kdoc-react-host\{/);
-  assert.match(css, /\.kdoc-react-host \.kdoc-tree\{[^}]*overflow:hidden/);
-  assert.match(css, /\.kdoc-react-host\.kdoc-details-side-overlay:not\(\.kdoc-has-focus\) \.kdoc-details\{display:none\}/);
-  assert.match(css, /\.kdoc-react-host\.kdoc-details-side-overlay \.kdoc-details\{[^}]*position:fixed[^}]*z-index:2147483647/);
+  assert.match(css, /\.kdoc-embedded-host\{/);
+  assert.match(css, /\.kdoc-embedded-host \.kdoc-tree\{[^}]*overflow:hidden/);
+  assert.match(css, /\.kubectl-doc\.kdoc-details-side-overlay:not\(\.kdoc-has-focus\) \.kdoc-details\{display:none\}/);
+  assert.match(css, /\.kubectl-doc\.kdoc-details-side-overlay \.kdoc-details\{[^}]*position:fixed[^}]*z-index:2147483647/);
 });
 
 test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc and loads JSON assets only", () => {
@@ -152,11 +153,11 @@ test("LazyKubeSchemaDoc delegates idle hydration to KubeSchemaDoc and loads JSON
 
 test("KubeSchemaDoc keeps long YAML/comment lines inside the schema frame", () => {
   const css = readFileSync(join(componentRoot, "kubectl-doc-styles.ts"), "utf8");
-  assert.match(css, /\.kdoc-react-host \.kdoc-tree\{[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden/);
-  assert.match(css, /\.kdoc-react-host \.kdoc-line\{[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden[^}]*white-space:normal/);
-  assert.match(css, /\.kdoc-react-host \.kdoc-line\[hidden\]\{display:none!important\}/);
-  assert.match(css, /\.kdoc-react-host \.kdoc-yaml-text\{[^}]*display:block[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere[^}]*white-space:pre-wrap/);
-  assert.match(css, /\.kdoc-react-host \.kdoc-yaml-text \*\{[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere/);
+  assert.match(css, /\.kdoc-embedded-host \.kdoc-tree\{[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden/);
+  assert.match(css, /\.kdoc-embedded-host \.kdoc-line\{[^}]*display:grid[^}]*grid-template-columns:24px minmax\(0,1fr\)[^}]*inline-size:100%[^}]*max-inline-size:100%[^}]*overflow:hidden[^}]*white-space:normal/);
+  assert.match(css, /\.kdoc-embedded-host \.kdoc-line\[hidden\]\{display:none!important\}/);
+  assert.match(css, /\.kdoc-embedded-host \.kdoc-yaml-text\{[^}]*display:block[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere[^}]*white-space:pre-wrap/);
+  assert.match(css, /\.kdoc-embedded-host \.kdoc-yaml-text \*\{[^}]*max-inline-size:100%[^}]*min-inline-size:0[^}]*overflow-wrap:anywhere/);
 });
 
 test("KubeSchemaDoc keeps field details as a focused high-z overlay", () => {
@@ -164,9 +165,9 @@ test("KubeSchemaDoc keeps field details as a focused high-z overlay", () => {
   const css = readFileSync(join(componentRoot, "kubectl-doc-styles.ts"), "utf8");
   assert.match(runtime, /root\.classList\.add\("kdoc-has-focus"\)/);
   assert.match(runtime, /root\.classList\.remove\("kdoc-has-focus"\)/);
-  assert.match(css, /\.kdoc-react-host\{[^}]*position:relative[^}]*z-index:2147483000/);
-  assert.match(css, /\.kdoc-react-host\.kdoc-details-side-overlay:not\(\.kdoc-has-focus\) \.kdoc-details\{display:none\}/);
-  assert.match(css, /\.kdoc-react-host\.kdoc-details-side-overlay \.kdoc-details\{[^}]*position:fixed[^}]*z-index:2147483647/);
+  assert.match(css, /\.kdoc-embedded-host\{[^}]*position:relative/);
+  assert.match(css, /\.kubectl-doc\.kdoc-details-side-overlay:not\(\.kdoc-has-focus\) \.kdoc-details\{display:none\}/);
+  assert.match(css, /\.kubectl-doc\.kdoc-details-side-overlay \.kdoc-details\{[^}]*position:fixed[^}]*z-index:2147483647/);
 });
 
 test("multi-version API reference pages keep inactive versions behind Fern tabs", () => {

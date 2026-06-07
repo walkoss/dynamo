@@ -16,6 +16,7 @@ export type KubeSchemaLine = {
   foldable?: boolean;
   collapsed?: boolean;
   detailId?: string;
+  commentGroup?: string;
   tokens?: KubeSchemaToken[];
   comment?: KubeSchemaComment;
 };
@@ -283,7 +284,7 @@ export function KubeSchemaDoc({
     runtimeLoader,
   ]);
 
-  return <div ref={rootRef} className={classNames("kubectl-doc", "kdoc-react-host", className)} />;
+  return <div ref={rootRef} className={classNames("kubectl-doc", "kdoc-embedded-host", "kdoc-react-host", className)} />;
 }
 
 export default KubeSchemaDoc;

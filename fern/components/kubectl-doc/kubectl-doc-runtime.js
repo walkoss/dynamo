@@ -109,33 +109,48 @@
     if(isCommentLine(text)){ return renderCommentText(text); }
     return escapeHTML(text);
   }
+  function lineDetailID(line, index){
+    return line.detailId || ("line-" + (line.index != null ? line.index : index));
+  }
+  function renderLineHTML(line, index, fields){
+    var field = line.detailId ? fields.get(line.detailId) : null;
+    var text = lineText(line);
+    var classes = "kdoc-line" + (text.trim() ? "" : " kdoc-blank");
+    var fieldAttr = line.field ? " data-kdoc-field data-kdoc-field-name=\"" + attr(line.field) + "\" data-kdoc-filter-text=\"" + attr((line.field || "") + "\n" + (field && field.description ? field.description : "")) + "\"" : "";
+    var commentGroupAttr = line.commentGroup ? " data-kdoc-comment-group=\"" + attr(line.commentGroup) + "\"" : "";
+    var detailID = lineDetailID(line, index);
+    var html = "<div class=\"" + classes + "\" role=\"treeitem\" data-kdoc-line" + fieldAttr + commentGroupAttr + " data-index=\"" + attr(line.index != null ? line.index : index) + "\" data-depth=\"" + attr(line.depth || 0) + "\" data-path=\"" + attr(line.path || "") + "\" data-detail-id=\"" + attr(detailID) + "\" data-detail=\"\" data-detail-html=\"" + attr(detailHTML(field)) + "\">";
+    if(line.foldable){
+      html += "<button class=\"kdoc-fold\" type=\"button\" aria-label=\"Toggle\" aria-expanded=\"" + (line.collapsed ? "false" : "true") + "\" data-kdoc-toggle></button>";
+    } else {
+      html += "<span class=\"kdoc-gutter\"></span>";
+    }
+    var commentText = line.comment || (!line.tokens && isCommentLine(text));
+    html += "<span class=\"kdoc-yaml-text" + (commentText ? " kdoc-yaml-comment-text" : "") + "\">" + renderLineYAML(line, text) + "</span>";
+    html += "</div>";
+    return html;
+  }
+  function renderTreeHTML(schema, lines, fields){
+    var html = "";
+    (lines || (schema && schema.lines) || []).forEach(function(line, index){
+      html += renderLineHTML(line, index, fields);
+    });
+    return html;
+  }
   function renderSchema(root, schema, options){
     var fields = fieldMap(schema || {});
     var filtering = options.filtering !== false;
     var showWrapControl = options.wrapControl !== false;
     var wrapChecked = options.wrapComments !== false;
+    var detailsMode = options.detailsMode || root.getAttribute("data-kdoc-details-mode") || "";
     root.classList.add("kubectl-doc");
-    root.classList.toggle("kdoc-details-side-overlay", options.detailsMode === "side-overlay");
+    root.classList.toggle("kdoc-details-side-overlay", detailsMode === "side-overlay");
+    root.classList.toggle("kdoc-embedded-host", detailsMode === "side-overlay" || root.classList.contains("kdoc-embedded-host"));
     root.classList.toggle("kdoc-filter-disabled", !filtering);
     root.setAttribute("data-kubectl-doc", "");
     if(!root.hasAttribute("tabindex")){ root.setAttribute("tabindex", "0"); }
     var html = "<div class=\"kdoc-layout\"><section class=\"kdoc-docs\"><div class=\"kdoc-filter-overlay\" data-kdoc-filter-overlay hidden></div><section class=\"kdoc-version\"><div class=\"kdoc-tree\" role=\"tree\" aria-label=\"" + attr((schema && schema.kind ? schema.kind : "Kubernetes") + " YAML schema") + "\">";
-    (schema.lines || []).forEach(function(line, index){
-      var field = line.detailId ? fields.get(line.detailId) : null;
-      var text = lineText(line);
-      var classes = "kdoc-line" + (text.trim() ? "" : " kdoc-blank");
-      var fieldAttr = line.field ? " data-kdoc-field data-kdoc-field-name=\"" + attr(line.field) + "\" data-kdoc-filter-text=\"" + attr((line.field || "") + "\n" + (field && field.description ? field.description : "")) + "\"" : "";
-      var detailID = line.detailId || ("line-" + index);
-      html += "<div class=\"" + classes + "\" role=\"treeitem\" data-kdoc-line" + fieldAttr + " data-index=\"" + attr(line.index != null ? line.index : index) + "\" data-depth=\"" + attr(line.depth || 0) + "\" data-path=\"" + attr(line.path || "") + "\" data-detail-id=\"" + attr(detailID) + "\" data-detail=\"\" data-detail-html=\"" + attr(detailHTML(field)) + "\">";
-      if(line.foldable){
-        html += "<button class=\"kdoc-fold\" type=\"button\" aria-label=\"Toggle\" aria-expanded=\"" + (line.collapsed ? "false" : "true") + "\" data-kdoc-toggle></button>";
-      } else {
-        html += "<span class=\"kdoc-gutter\"></span>";
-      }
-      var commentText = line.comment || (!line.tokens && isCommentLine(text));
-      html += "<span class=\"kdoc-yaml-text" + (commentText ? " kdoc-yaml-comment-text" : "") + "\">" + renderLineYAML(line, text) + "</span>";
-      html += "</div>";
-    });
+    html += renderTreeHTML(schema, schema.lines || [], fields);
     html += "</div></section></section><aside class=\"kdoc-details\" data-kdoc-details aria-live=\"polite\"><h2>Details</h2><div class=\"kdoc-detail-body\" data-kdoc-detail-body><p class=\"kdoc-detail-empty\">Select a field.</p></div></aside></div>";
     if(showWrapControl){
       html += "<div class=\"kdoc-view-controls\" aria-label=\"View options\"><label class=\"kdoc-wrap-toggle\"><input type=\"checkbox\" data-kdoc-wrap-comments" + (wrapChecked ? " checked" : "") + "><span class=\"kdoc-switch\" aria-hidden=\"true\"></span><span class=\"kdoc-wrap-label\">wrap</span></label></div>";
@@ -146,12 +161,14 @@
       options = options || {};
       if(!root){ return null; }
       if(root.__kubectlDocController){ return root.__kubectlDocController; }
+      var mountStart = perfNow();
       if(options.initialSchema && !root.querySelector("[data-kdoc-line]")){
         renderSchema(root, options.initialSchema, options);
       }
 
-      var lines = Array.prototype.slice.call(root.querySelectorAll("[data-kdoc-line]"));
-      var comments = Array.prototype.slice.call(root.querySelectorAll("[data-kdoc-comment]"));
+      var tree = root.querySelector(".kdoc-tree");
+      var lines = [];
+      var comments = [];
       var details = root.querySelector("[data-kdoc-detail-body]");
       var wrapComments = root.querySelector("[data-kdoc-wrap-comments]");
       var filterOverlay = root.querySelector("[data-kdoc-filter-overlay]");
@@ -164,6 +181,12 @@
       var filterQuery = "";
       var activeFilterState = null;
       var activeFilterProjection = null;
+      var viewSchema = options.initialSchema || null;
+      var fullSchema = viewSchema && viewSchema.complete !== false ? viewSchema : null;
+      var fullSchemaIndex = null;
+      var fullSchemaCallbacks = [];
+      var renderedFullProjection = false;
+      var foldStateByPath = Object.create(null);
       var lineStates = [];
       var stateByLine = new Map();
       var fieldStates = [];
@@ -172,6 +195,7 @@
       var detailLineStates = new Map();
       var allLineSet = new Set(lines);
       var commentStates = [];
+      var commentGroups = [];
       var highlightedElements = [];
       var selectedLines = [];
       var filterVisibleLines = [];
@@ -181,67 +205,181 @@
       var filterFoldOverrides = Object.create(null);
       var filtering = options.filtering !== false;
       var loadingFullSchema = false;
+      var pendingFullFilterRender = false;
       var mountedOptions = options;
       var controller = null;
       var staleBackdropTimers = [];
-      var scopedKeyboard = options.detailsMode === "side-overlay";
+      var detailsMode = options.detailsMode || root.getAttribute("data-kdoc-details-mode") || "";
+      var scopedKeyboard = detailsMode === "side-overlay";
       if(scopedKeyboard && !root.hasAttribute("tabindex")){ root.setAttribute("tabindex", "0"); }
       root.classList.toggle("kdoc-details-side-overlay", scopedKeyboard);
+      root.classList.toggle("kdoc-embedded-host", scopedKeyboard || root.classList.contains("kdoc-embedded-host"));
 
-      lines.forEach(function(line, index){
-        var detailID = line.getAttribute("data-detail-id") || "";
-        var path = (line.getAttribute("data-path") || "").toLowerCase();
-        var textElement = line.querySelector(".kdoc-yaml-text");
-        var version = line.closest(".kdoc-version") || root;
-        var state = {
-          line: line,
-          index: index,
-          version: version,
-          depth: Number(line.getAttribute("data-depth") || "0"),
-          field: line.hasAttribute("data-kdoc-field"),
-          filterText: (line.getAttribute("data-kdoc-filter-text") || "").toLowerCase(),
-          path: path,
-          pathParts: path ? path.split(".") : [],
-          detailID: detailID,
-          textTrim: line.textContent.trim(),
-          textElement: textElement,
-          textLower: textElement ? textElement.textContent.toLowerCase() : "",
-          toggle: line.querySelector("[data-kdoc-toggle]"),
-          fieldState: null,
-          ancestors: [],
-          descendants: [],
-          pathHit: ""
+      function perfNow(){
+        return global.performance && performance.now ? performance.now() : Date.now();
+      }
+      function recordPerf(name, start, detail){
+        var entry = {
+          name: name,
+          duration: Math.max(0, perfNow() - start),
+          detail: detail || {}
         };
-        lineStates.push(state);
-        stateByLine.set(line, state);
-        if(detailID){
-          if(!detailLineGroups.has(detailID)){ detailLineGroups.set(detailID, []); }
-          if(!detailLineStates.has(detailID)){ detailLineStates.set(detailID, []); }
-          detailLineGroups.get(detailID).push(line);
-          detailLineStates.get(detailID).push(state);
-        }
-        if(state.field){
-          state.fieldState = state;
-          fieldStates.push(state);
-          if(detailID && !detailFieldByID.has(detailID)){ detailFieldByID.set(detailID, state); }
-        }
-      });
-      lineStates.forEach(function(state){
-        if(!state.field && state.detailID && detailFieldByID.has(state.detailID)){
-          state.fieldState = detailFieldByID.get(state.detailID);
-        }
-      });
-      var ancestorStack = [];
-      fieldStates.forEach(function(state){
-        while(ancestorStack.length && ancestorStack[ancestorStack.length - 1].depth >= state.depth){ ancestorStack.pop(); }
-        state.ancestors = ancestorStack.slice();
-        state.ancestors.forEach(function(ancestor){ ancestor.descendants.push(state); });
-        ancestorStack.push(state);
-      });
+        global.__kubectlDocPerf = global.__kubectlDocPerf || [];
+        global.__kubectlDocPerf.push(entry);
+        try {
+          root.dispatchEvent(new CustomEvent("kubectl-doc:perf", {detail: entry}));
+        } catch(_err) {}
+        return entry;
+      }
+
+      function initializeFromDOM(){
+        lines = Array.prototype.slice.call(root.querySelectorAll("[data-kdoc-line]"));
+        comments = Array.prototype.slice.call(root.querySelectorAll("[data-kdoc-comment]"));
+        activeFilterState = null;
+        activeFilterProjection = null;
+        lineStates = [];
+        stateByLine = new Map();
+        fieldStates = [];
+        detailFieldByID = new Map();
+        detailLineGroups = new Map();
+        detailLineStates = new Map();
+        allLineSet = new Set(lines);
+        commentStates = [];
+        commentGroups = [];
+        highlightedElements = [];
+        selectedLines = [];
+        filterVisibleLines = [];
+
+        lines.forEach(function(line, index){
+          var detailID = line.getAttribute("data-detail-id") || "";
+          var path = (line.getAttribute("data-path") || "").toLowerCase();
+          var textElement = line.querySelector(".kdoc-yaml-text");
+          var version = line.closest(".kdoc-version") || root;
+          var state = {
+            line: line,
+            index: index,
+            version: version,
+            depth: Number(line.getAttribute("data-depth") || "0"),
+            field: line.hasAttribute("data-kdoc-field"),
+            filterText: (line.getAttribute("data-kdoc-filter-text") || "").toLowerCase(),
+            path: path,
+            pathParts: path ? path.split(".") : [],
+            detailID: detailID,
+            textTrim: line.textContent.trim(),
+            textElement: textElement,
+            textLower: textElement ? textElement.textContent.toLowerCase() : "",
+            toggle: line.querySelector("[data-kdoc-toggle]"),
+            fieldState: null,
+            ancestors: [],
+            descendants: [],
+            pathHit: ""
+          };
+          lineStates.push(state);
+          stateByLine.set(line, state);
+          if(detailID){
+            if(!detailLineGroups.has(detailID)){ detailLineGroups.set(detailID, []); }
+            if(!detailLineStates.has(detailID)){ detailLineStates.set(detailID, []); }
+            detailLineGroups.get(detailID).push(line);
+            detailLineStates.get(detailID).push(state);
+          }
+          if(state.field){
+            state.fieldState = state;
+            fieldStates.push(state);
+            if(detailID && !detailFieldByID.has(detailID)){ detailFieldByID.set(detailID, state); }
+          }
+          if(state.toggle && state.path && !Object.prototype.hasOwnProperty.call(foldStateByPath, state.path)){
+            foldStateByPath[state.path] = state.toggle.getAttribute("aria-expanded") !== "false";
+          }
+        });
+        lineStates.forEach(function(state){
+          if(!state.field && state.detailID && detailFieldByID.has(state.detailID)){
+            state.fieldState = detailFieldByID.get(state.detailID);
+          }
+        });
+        var ancestorStack = [];
+        fieldStates.forEach(function(state){
+          while(ancestorStack.length && ancestorStack[ancestorStack.length - 1].depth >= state.depth){ ancestorStack.pop(); }
+          state.ancestors = ancestorStack.slice();
+          state.ancestors.forEach(function(ancestor){ ancestor.descendants.push(state); });
+          ancestorStack.push(state);
+        });
+        comments.forEach(function(comment){
+          var line = comment.closest("[data-kdoc-line]");
+          commentStates.push({
+            comment: comment,
+            line: line,
+            lineState: line ? lineState(line) : null,
+            detailID: line ? line.getAttribute("data-detail-id") || "" : "",
+            groupID: line ? line.getAttribute("data-kdoc-comment-group") || "" : "",
+            firstPrefix: comment.getAttribute("data-kdoc-comment-prefix") || "",
+            nextPrefix: comment.getAttribute("data-kdoc-comment-wrap-prefix") || comment.getAttribute("data-kdoc-comment-prefix") || "",
+            text: comment.getAttribute("data-kdoc-comment-text") || "",
+            commentGroup: null,
+            wrapState: ""
+          });
+        });
+        commentGroups = buildCommentGroups(commentStates);
+      }
 
       function lineState(line){ return stateByLine.get(line) || null; }
       function button(line){ var state = lineState(line); return state ? state.toggle : line.querySelector("[data-kdoc-toggle]"); }
       function depth(line){ var state = lineState(line); return state ? state.depth : Number(line.getAttribute("data-depth") || "0"); }
+      function buildSchemaIndex(schema){
+        var fields = fieldMap(schema || {});
+        var states = [];
+        var stateFields = [];
+        var stateDetailFields = new Map();
+        var stateDetailLines = new Map();
+        (schema.lines || []).forEach(function(line, index){
+          var detailID = lineDetailID(line, index);
+          var field = detailID ? fields.get(detailID) : null;
+          var text = lineText(line);
+          var path = String(line.path || "").toLowerCase();
+          var state = {
+            model: line,
+            index: index,
+            depth: Number(line.depth || 0),
+            field: !!line.field,
+            filterText: (String(line.field || "") + "\n" + (field && field.description ? field.description : "")).toLowerCase(),
+            path: path,
+            pathParts: path ? path.split(".") : [],
+            detailID: detailID,
+            textTrim: text.trim(),
+            textLower: text.toLowerCase(),
+            ancestors: [],
+            descendants: [],
+            pathHit: ""
+          };
+          states.push(state);
+          if(detailID){
+            if(!stateDetailLines.has(detailID)){ stateDetailLines.set(detailID, []); }
+            stateDetailLines.get(detailID).push(state);
+          }
+          if(state.field){
+            state.fieldState = state;
+            stateFields.push(state);
+            if(detailID && !stateDetailFields.has(detailID)){ stateDetailFields.set(detailID, state); }
+          }
+        });
+        states.forEach(function(state){
+          if(!state.field && state.detailID && stateDetailFields.has(state.detailID)){
+            state.fieldState = stateDetailFields.get(state.detailID);
+          }
+        });
+        var stack = [];
+        stateFields.forEach(function(state){
+          while(stack.length && stack[stack.length - 1].depth >= state.depth){ stack.pop(); }
+          state.ancestors = stack.slice();
+          state.ancestors.forEach(function(ancestor){ ancestor.descendants.push(state); });
+          stack.push(state);
+        });
+        return {schema: schema, fields: fields, lineStates: states, fieldStates: stateFields, detailLineStates: stateDetailLines};
+      }
+      function ensureFullSchemaIndex(){
+        if(!fullSchema){ return null; }
+        if(!fullSchemaIndex){ fullSchemaIndex = buildSchemaIndex(fullSchema); }
+        return fullSchemaIndex;
+      }
       function currentVersionSection(){
         if(currentLine){
           var state = lineState(currentLine);
@@ -251,43 +389,152 @@
         }
         return root.querySelector(".kdoc-version") || root;
       }
-      comments.forEach(function(comment){
-        var line = comment.closest("[data-kdoc-line]");
-        commentStates.push({
-          comment: comment,
-          line: line,
-          firstPrefix: comment.getAttribute("data-kdoc-comment-prefix") || "",
-          nextPrefix: comment.getAttribute("data-kdoc-comment-wrap-prefix") || comment.getAttribute("data-kdoc-comment-prefix") || "",
-          text: comment.getAttribute("data-kdoc-comment-text") || "",
+      function compactCommentGroupText(states){
+        return states.map(function(state){ return String(state.text || "").trim(); }).filter(Boolean).join(" ");
+      }
+      function newCommentGroup(state){
+        var group = {
+          key: state.groupID || "",
+          detailID: state.detailID || "",
+          firstPrefix: state.firstPrefix,
+          nextPrefix: state.nextPrefix,
+          states: [state],
+          text: "",
+          textLower: "",
           wrapState: ""
+        };
+        state.commentGroup = group;
+        return group;
+      }
+      function canJoinCommentGroup(group, state){
+        if(!group || !group.key || !state.groupID || !String(state.text || "").trim()){ return false; }
+        if(group.key !== state.groupID || group.detailID !== state.detailID){ return false; }
+        if(group.firstPrefix !== state.firstPrefix || group.nextPrefix !== state.nextPrefix){ return false; }
+        var previous = group.states[group.states.length - 1];
+        if(!previous || !previous.lineState || !state.lineState){ return false; }
+        return previous.lineState.index + 1 === state.lineState.index;
+      }
+      function finishCommentGroup(group){
+        if(!group){ return; }
+        group.text = compactCommentGroupText(group.states);
+        group.textLower = group.text.toLowerCase();
+      }
+      function buildCommentGroups(states){
+        var groups = [];
+        var current = null;
+        states.forEach(function(state){
+          if(!state.groupID || !String(state.text || "").trim()){
+            finishCommentGroup(current);
+            current = null;
+            var single = newCommentGroup(state);
+            finishCommentGroup(single);
+            groups.push(single);
+            return;
+          }
+          if(canJoinCommentGroup(current, state)){
+            current.states.push(state);
+            state.commentGroup = current;
+            return;
+          }
+          finishCommentGroup(current);
+          current = newCommentGroup(state);
+          groups.push(current);
         });
-      });
+        finishCommentGroup(current);
+        return groups;
+      }
       function expanded(line){ var b = button(line); return !b || b.getAttribute("aria-expanded") !== "false"; }
       function setExpanded(line, value, options){
         var b = button(line);
         if(!b){ return; }
         options = options || {};
+        var state = lineState(line);
+        if(state && state.path && !options.auto){ foldStateByPath[state.path] = !!value; }
         var next = value ? "true" : "false";
         if(b.getAttribute("aria-expanded") === next){ return; }
         b.setAttribute("aria-expanded", next);
         activeFilterProjection = null;
         if(filterQuery && !options.auto){
-          var state = lineState(line);
           if(state && state.path){ filterFoldOverrides[state.path] = !!value; }
         }
+      }
+      function modelExpanded(line, expandedResolver){
+        if(!line || !line.foldable){ return true; }
+        if(expandedResolver){
+          var resolved = expandedResolver(line);
+          if(resolved !== null && resolved !== undefined){ return !!resolved; }
+        }
+        var path = String(line.path || "").toLowerCase();
+        if(path && Object.prototype.hasOwnProperty.call(foldStateByPath, path)){ return !!foldStateByPath[path]; }
+        return !line.collapsed;
+      }
+      function lineWithExpandedState(line, expandedValue){
+        if(!line || !line.foldable){ return line; }
+        var collapsed = !expandedValue;
+        if(!!line.collapsed === collapsed){ return line; }
+        var clone = {};
+        Object.keys(line).forEach(function(key){ clone[key] = line[key]; });
+        clone.collapsed = collapsed;
+        return clone;
+      }
+      function projectedSchemaLines(index, expandedResolver, allowedStates){
+        var visible = [];
+        var hiddenDepth = -1;
+        index.lineStates.forEach(function(state){
+          if(allowedStates && !allowedStates.has(state)){ return; }
+          if(hiddenDepth >= 0){
+            if(state.textTrim === "" || state.depth > hiddenDepth){ return; }
+            hiddenDepth = -1;
+          }
+          var expandedValue = modelExpanded(state.model, expandedResolver);
+          visible.push(lineWithExpandedState(state.model, expandedValue));
+          if(state.model.foldable && !expandedValue){ hiddenDepth = state.depth; }
+        });
+        return visible;
+      }
+      function renderSchemaProjection(schema, index, projection, focusPathValue, scroll){
+        if(!tree){ return false; }
+        var projectionStart = perfNow();
+        clearFilterHighlights();
+        tree.innerHTML = renderTreeHTML(schema, projection, index.fields);
+        viewSchema = schema;
+        renderedFullProjection = schema === fullSchema;
+        commentColumnCache = 0;
+        initializeFromDOM();
+        applyCommentWrap();
+        applyFolds();
+        if(!focusPathValue || !focusPath(focusPathValue, {scroll: scroll !== false})){
+          select(visibleFieldLines()[0] || lines[0], {scroll: scroll !== false});
+        }
+        recordPerf("projection-render", projectionStart, {
+          lines: projection.length,
+          fields: fieldStates.length,
+          complete: !!(schema && schema.complete)
+        });
+        return true;
+      }
+      function renderFullFoldProjection(focusPathValue, scroll){
+        var index = ensureFullSchemaIndex();
+        if(!index){ return false; }
+        return renderSchemaProjection(fullSchema, index, projectedSchemaLines(index), focusPathValue, scroll);
       }
       function hasLoadedDescendants(line){
         var state = lineState(line);
         return !!(state && state.descendants && state.descendants.length);
       }
-      function wantsFullSchemaForExpansion(line){
-        return !!(line && mountedOptions.initialSchema && mountedOptions.initialSchema.complete === false && !expanded(line) && !hasLoadedDescendants(line));
+      function wantsFullProjectionForExpansion(line){
+        return !!(line && !expanded(line) && !hasLoadedDescendants(line) && (fullSchema || (viewSchema && viewSchema.complete === false)));
       }
       function expandWithFullSchema(line){
-        if(wantsFullSchemaForExpansion(line)){
+        if(wantsFullProjectionForExpansion(line)){
+          var path = line.getAttribute("data-path") || "";
           select(line, {scroll:false});
           setExpanded(line, true);
-          requestFullSchema();
+          if(fullSchema){
+            renderFullFoldProjection(path, true);
+          } else {
+            requestFullSchema(function(){ renderFullFoldProjection(path, true); });
+          }
           return true;
         }
         setExpanded(line, true);
@@ -485,6 +732,62 @@
       function filterSnapshotExpanded(path){
         return filterFoldSnapshotByPath && Object.prototype.hasOwnProperty.call(filterFoldSnapshotByPath, path) ? filterFoldSnapshotByPath[path] : null;
       }
+      function groupedModelLineStates(index, state){
+        if(!state.detailID){ return [state]; }
+        return index.detailLineStates.get(state.detailID) || [state];
+      }
+      function fullFilterProjection(){
+        var index = ensureFullSchemaIndex();
+        var query = filterQuery.toLowerCase();
+        if(!index || !query){ return null; }
+
+        var pathFilter = parsePathFilter(query);
+        var directFields = new Set();
+        index.fieldStates.forEach(function(state){
+          state.pathHit = pathFilterHighlightForState(state, pathFilter);
+          if(state.filterText.indexOf(query) >= 0 || state.pathHit){
+            directFields.add(state);
+          }
+        });
+
+        var includedFields = new Set();
+        var includedPaths = Object.create(null);
+        var allowedStates = new Set();
+        directFields.forEach(function(state){
+          includedFields.add(state);
+          state.ancestors.forEach(function(ancestor){ includedFields.add(ancestor); });
+          state.descendants.forEach(function(descendant){ includedFields.add(descendant); });
+          groupedModelLineStates(index, state).forEach(function(lineStateValue){ allowedStates.add(lineStateValue); });
+        });
+        includedFields.forEach(function(state){
+          if(state.path){ includedPaths[state.path] = true; }
+          groupedModelLineStates(index, state).forEach(function(lineStateValue){ allowedStates.add(lineStateValue); });
+        });
+
+        return {
+          index: index,
+          allowedStates: allowedStates,
+          expandedResolver: function(line){
+            var path = String(line.path || "").toLowerCase();
+            if(!path){ return null; }
+            var override = filterFoldOverride(path);
+            if(override !== null){ return override; }
+            if(includedPaths[path]){ return true; }
+            return filterSnapshotExpanded(path);
+          }
+        };
+      }
+      function renderFullFilterProjection(focusPathValue, scroll){
+        var projection = fullFilterProjection();
+        if(!projection){ return false; }
+        return renderSchemaProjection(
+          fullSchema,
+          projection.index,
+          projectedSchemaLines(projection.index, projection.expandedResolver, projection.allowedStates),
+          focusPathValue,
+          scroll
+        );
+      }
       function autoRevealFilterBranches(state){
         if(!state){ return; }
         fieldStates.forEach(function(fieldState){
@@ -601,6 +904,18 @@
       }
       function visibleFieldLines(){
         return fieldStates.filter(function(state){ return lineVisible(state.line); }).map(function(state){ return state.line; });
+      }
+      function firstVisibleLineInVersion(version){
+        for(var i = 0; i < lineStates.length; i++){
+          if(lineStates[i].version === version && lineVisible(lineStates[i].line)){ return lineStates[i].line; }
+        }
+        return null;
+      }
+      function firstVisibleFieldLineInVersion(version){
+        for(var i = 0; i < fieldStates.length; i++){
+          if(fieldStates[i].version === version && lineVisible(fieldStates[i].line)){ return fieldStates[i].line; }
+        }
+        return null;
       }
       function visibleFoldableLines(){
         return fieldStates.filter(function(state){ return lineVisible(state.line) && !!state.toggle; }).map(function(state){ return state.line; });
@@ -784,7 +1099,7 @@
         var gutter = line ? line.querySelector(".kdoc-fold,.kdoc-gutter") : null;
         var text = line ? line.querySelector(".kdoc-yaml-text") : null;
         if(text && (!window.getComputedStyle || window.getComputedStyle(text).display !== "inline")){
-          width = Math.max(contentWidth(text), width);
+          width = contentWidth(text) || width;
           gutter = null;
         }
         if(gutter){ width -= gutter.getBoundingClientRect().width; }
@@ -831,22 +1146,49 @@
       function renderCommentLine(prefix, text){
         return "<span class=\"kdoc-comment-line\"><span class=\"kdoc-yaml-comment kdoc-comment-prefix\">" + escapeHTML(prefix) + "</span><span class=\"kdoc-yaml-comment kdoc-comment-body\">" + escapeHTML(text) + "</span></span>";
       }
-      function renderComment(state, wrapped, lineChars){
-        if(wrapped && state.line && !lineVisible(state.line)){ return false; }
-        var wrapState = wrapped ? "wrap:" + lineChars : "nowrap";
-        if(state.wrapState === wrapState){ return false; }
-        if(!wrapped){
-          state.comment.innerHTML = "<span class=\"kdoc-yaml-comment kdoc-comment-prefix\">" + escapeHTML(state.firstPrefix) + "</span><span class=\"kdoc-yaml-comment kdoc-comment-body\">" + escapeHTML(state.text) + "</span>";
-          state.wrapState = wrapState;
-          return true;
-        }
+      function renderOriginalComment(state, wrapState){
+        if(state.line){ state.line.classList.remove("kdoc-comment-reflow-hidden"); }
+        state.comment.innerHTML = "<span class=\"kdoc-yaml-comment kdoc-comment-prefix\">" + escapeHTML(state.firstPrefix) + "</span><span class=\"kdoc-yaml-comment kdoc-comment-body\">" + escapeHTML(state.text) + "</span>";
+        state.wrapState = wrapState;
+      }
+      function renderWrappedComment(state, text, lineChars, wrapState){
         var firstLimit = Math.max(lineChars - state.firstPrefix.length, 8);
         var nextLimit = Math.max(lineChars - state.nextPrefix.length, 8);
-        var chunks = wrapCommentText(state.text, firstLimit, nextLimit);
+        var chunks = wrapCommentText(text, firstLimit, nextLimit);
         state.comment.innerHTML = chunks.map(function(chunk, index){
           return renderCommentLine(index === 0 ? state.firstPrefix : state.nextPrefix, chunk);
-        }).join("\n");
+        }).join("");
         state.wrapState = wrapState;
+      }
+      function groupVisible(group){
+        return group.states.some(function(state){ return state.line && lineVisible(state.line); });
+      }
+      function renderCommentGroup(group, wrapped, lineChars){
+        if(wrapped && !groupVisible(group)){ return false; }
+        var wrapState = wrapped ? "wrap:" + lineChars + ":" + group.text : "nowrap";
+        if(group.wrapState === wrapState){ return false; }
+        if(!wrapped){
+          group.states.forEach(function(state){ renderOriginalComment(state, wrapState); });
+          group.wrapState = wrapState;
+          return true;
+        }
+        if(group.states.length === 1 || !group.key){
+          group.states.forEach(function(state){
+            if(state.line){ state.line.classList.remove("kdoc-comment-reflow-hidden"); }
+            renderWrappedComment(state, state.text, lineChars, wrapState);
+          });
+          group.wrapState = wrapState;
+          return true;
+        }
+        group.states.forEach(function(state, index){
+          if(state.line){ state.line.classList.toggle("kdoc-comment-reflow-hidden", index > 0); }
+          if(index === 0){
+            renderWrappedComment(state, group.text, lineChars, wrapState);
+            return;
+          }
+          state.wrapState = wrapState;
+        });
+        group.wrapState = wrapState;
         return true;
       }
       function applyCommentWrap(){
@@ -854,8 +1196,8 @@
         var lineChars = wrapped ? commentLineChars() : 0;
         var changed = false;
         root.classList.toggle("kdoc-wrap-comments", wrapped);
-        commentStates.forEach(function(state){
-          if(renderComment(state, wrapped, lineChars)){ changed = true; }
+        commentGroups.forEach(function(group){
+          if(renderCommentGroup(group, wrapped, lineChars)){ changed = true; }
         });
         if(changed){ applyFilterHighlights(); }
       }
@@ -904,23 +1246,33 @@
       }
       function clearFilter(){
         var line = currentLine;
+        var path = line ? line.getAttribute("data-path") || "" : "";
         restoreFilterFoldSnapshot();
         filterQuery = "";
         activeFilterState = null;
         endFilterSession();
         updateFilterOverlay();
         if(line){ expandAncestors(line); }
+        if(fullSchema && renderedFullProjection){
+          renderFullFoldProjection(path, true);
+          return;
+        }
         applyFolds();
         scheduleCommentWrap();
         select(line || visibleFieldLines()[0] || lines[0], {scroll:true});
       }
       function acceptFilter(){
         var line = currentLine;
+        var path = line ? line.getAttribute("data-path") || "" : "";
         visibleFieldLines().forEach(function(field){ expandAncestors(field); });
         filterQuery = "";
         activeFilterState = null;
         endFilterSession();
         updateFilterOverlay();
+        if(fullSchema && renderedFullProjection){
+          renderFullFoldProjection(path, true);
+          return;
+        }
         applyFolds();
         scheduleCommentWrap();
         select(line || visibleFieldLines()[0] || lines[0], {scroll:true});
@@ -932,7 +1284,18 @@
         }
         select(visibleFieldLines()[0] || lines[0], {scroll:true});
       }
+      function recordFilterApply(start, value){
+        recordPerf("filter-apply", start, {
+          queryLength: String(value || "").length,
+          lines: lines.length,
+          fields: fieldStates.length,
+          visibleLines: filterQuery ? filterVisibleLines.length : visibleFieldLines().length,
+          full: !!fullSchema,
+          renderedFull: !!renderedFullProjection
+        });
+      }
       function setFilter(value){
+        var filterStart = perfNow();
         value = String(value || "");
         if(value && !filterQuery){ beginFilterSession(); }
         if(!value && filterQuery){
@@ -942,12 +1305,40 @@
         filterQuery = value;
         activeFilterState = null;
         activeFilterProjection = null;
-        if(filtering && filterQuery && mountedOptions.initialSchema && mountedOptions.initialSchema.complete === false){
-          requestFullSchema();
+        var path = currentLine ? currentLine.getAttribute("data-path") || "" : "";
+        if(filtering && filterQuery && fullSchema){
+          updateFilterOverlay();
+          renderFullFilterProjection(path, true);
+          ensureFilteredFocus();
+          recordFilterApply(filterStart, value);
+          return;
+        }
+        if(filtering && filterQuery && viewSchema && viewSchema.complete === false){
+          updateFilterOverlay();
+          if(pendingFullFilterRender){
+            clearFilterHighlights();
+            return;
+          }
+          pendingFullFilterRender = true;
+          var requestedFullSchema = requestFullSchema(function(schema){
+            pendingFullFilterRender = false;
+            if(!schema || !filterQuery){ return; }
+            var focusPathValue = currentLine ? currentLine.getAttribute("data-path") || path : path;
+            var callbackFilterStart = perfNow();
+            renderFullFilterProjection(focusPathValue, true);
+            ensureFilteredFocus();
+            recordFilterApply(callbackFilterStart, filterQuery);
+          });
+          if(requestedFullSchema){
+            clearFilterHighlights();
+            return;
+          }
+          pendingFullFilterRender = false;
         }
         updateFilterOverlay();
         applyFolds();
         ensureFilteredFocus();
+        recordFilterApply(filterStart, value);
       }
       function filterKey(event){
         if(!filtering){ return ""; }
@@ -1010,7 +1401,18 @@
         var filterState = currentFilterState();
         if(!filterState){ return; }
         var visibleLines = filterAllowedLines();
+        var highlightedCommentGroups = new Set();
         filterState.highlightLineStates.forEach(function(state){
+          if(state.commentGroup && state.commentGroup.states.length > 1){
+            var group = state.commentGroup;
+            if(highlightedCommentGroups.has(group)){ return; }
+            highlightedCommentGroups.add(group);
+            if(!group.states.some(function(groupState){ return visibleLines.has(groupState.line); })){ return; }
+            var leader = group.states[0];
+            if(!leader || !leader.textElement){ return; }
+            highlightElementIfContains(leader.textElement, group.textLower, query);
+            return;
+          }
           if(!visibleLines.has(state.line)){ return; }
           var text = state.textElement;
           if(!text){ return; }
@@ -1023,6 +1425,30 @@
       function clearSelection(){
         root.querySelectorAll(".kdoc-selected").forEach(function(item){ item.classList.remove("kdoc-selected"); });
         selectedLines = [];
+      }
+      function documentTop(element){
+        var rect = element && element.getBoundingClientRect ? element.getBoundingClientRect() : null;
+        return rect ? rect.top + (window.pageYOffset || 0) : 0;
+      }
+      function fitsScrollContext(anchor, line){
+        if(!anchor || !line || anchor === line){ return false; }
+        return documentTop(line) - documentTop(anchor) < Math.max(160, window.innerHeight * 0.65);
+      }
+      function versionContextAnchor(version){
+        if(!version || version === root){ return root; }
+        return root.querySelector(".kdoc-version") === version ? root : version;
+      }
+      function scrollAnchorForSelection(line){
+        var state = lineState(line);
+        if(!state || !state.field || firstVisibleFieldLineInVersion(state.version) !== line){ return line; }
+        var firstLine = firstVisibleLineInVersion(state.version);
+        var context = versionContextAnchor(state.version);
+        return fitsScrollContext(context, line) ? context : (firstLine || line);
+      }
+      function scrollSelectionIntoView(line){
+        var anchor = scrollAnchorForSelection(line);
+        if(!anchor || !anchor.scrollIntoView){ return; }
+        anchor.scrollIntoView({block: anchor === line ? "nearest" : "start", inline:"nearest"});
       }
       function select(line, options){
         if(!line){ return; }
@@ -1043,7 +1469,7 @@
         selectedLines.forEach(function(item){ item.classList.add("kdoc-selected"); });
         showDetails(line);
         if(options.scroll && line.scrollIntoView){
-          line.scrollIntoView({block:"nearest", inline:"nearest"});
+          scrollSelectionIntoView(line);
         }
       }
       function typingTarget(target){
@@ -1060,47 +1486,64 @@
         } catch(_err) {}
         return true;
       }
-      function requestFullSchema(){
-        if(loadingFullSchema || !mountedOptions.loadFullSchema){ return false; }
+      function flushFullSchemaCallbacks(schema){
+        var callbacks = fullSchemaCallbacks.slice();
+        fullSchemaCallbacks = [];
+        callbacks.forEach(function(item){ item(schema); });
+      }
+      function requestFullSchema(callback){
+        if(fullSchema){
+          ensureFullSchemaIndex();
+          if(callback){ callback(fullSchema); }
+          return true;
+        }
+        if(loadingFullSchema){
+          if(callback){ fullSchemaCallbacks.push(callback); }
+          return true;
+        }
+        if(!mountedOptions.loadFullSchema){ return false; }
+        if(callback){ fullSchemaCallbacks.push(callback); }
         loadingFullSchema = true;
+        var loadStart = perfNow();
         Promise.resolve(mountedOptions.loadFullSchema()).then(function(schema){
           loadingFullSchema = false;
-          if(!schema){ return; }
-          var currentPath = currentLine ? currentLine.getAttribute("data-path") || "" : "";
-          var currentFilter = filterQuery;
-          var foldStates = foldSnapshot();
-          var hadFocus = hostHasFocus();
-          if(controller){ controller.destroy(); }
-          var nextOptions = {};
-          Object.keys(mountedOptions).forEach(function(key){ nextOptions[key] = mountedOptions[key]; });
-          nextOptions.initialSchema = schema;
-          nextOptions.loadFullSchema = null;
-          root.innerHTML = "";
-          var nextController = global.KubectlDoc.mount(root, nextOptions);
-          if(hadFocus && nextController && nextController.setFocused){ nextController.setFocused(true); }
-          restoreFoldSnapshot(nextController, foldStates);
-          if(currentFilter && nextController && nextController.setFilter){ nextController.setFilter(currentFilter); }
-          if(currentPath && nextController && nextController.focusPath){ nextController.focusPath(currentPath, {scroll:false}); }
+          if(!schema){
+            flushFullSchemaCallbacks(null);
+            return;
+          }
+          var activateStart = perfNow();
+          fullSchema = schema;
+          fullSchemaIndex = buildSchemaIndex(schema);
+          viewSchema = viewSchema || schema;
+          mountedOptions.loadFullSchema = null;
+          flushFullSchemaCallbacks(schema);
+          recordPerf("full-schema-activate", activateStart, {
+            lines: (schema.lines || []).length,
+            fields: (schema.fields || []).length,
+            renderedLines: lines.length
+          });
+          recordPerf("full-schema-load", loadStart, {
+            lines: (schema.lines || []).length,
+            fields: (schema.fields || []).length
+          });
         }).catch(function(error){
           loadingFullSchema = false;
+          flushFullSchemaCallbacks(null);
           if(global.console && console.error){ console.error("kubectl-doc schema failed to load", error); }
         });
         return true;
       }
       function handleCursorKey(event){
         if(event.defaultPrevented || typingTarget(event.target)){ return false; }
+        if(scopedKeyboard && !hostHasFocus()){ return false; }
         if(event.altKey || event.ctrlKey || event.metaKey){ return false; }
         var handled = false;
         if(event.key === "Escape" && filterQuery){
           clearFilter();
           handled = true;
         } else if(event.key === "Enter" && filterQuery){
-          var current = currentFieldLine();
-          handled = current && button(current) ? toggleField(current) : false;
-          if(!handled){
-            acceptFilter();
-            handled = true;
-          }
+          acceptFilter();
+          handled = true;
         } else if(filtering && event.key === "Backspace" && filterQuery){
           setFilter(filterQuery.slice(0, -1));
           handled = true;
@@ -1204,7 +1647,7 @@
         return !rect || (rect.width > 0 && rect.height > 0);
       }
       function releaseStaleConsentBackdrop(){
-        if(!root.classList.contains("kdoc-react-host") || !global.document){ return; }
+        if(!root.classList.contains("kdoc-embedded-host") || !global.document){ return; }
         var backdrop = document.querySelector(".onetrust-pc-dark-filter");
         if(!backdrop){ return; }
         var dialog = document.getElementById("onetrust-pc-sdk");
@@ -1215,7 +1658,7 @@
       }
       function scheduleConsentBackdropRelease(){
         releaseStaleConsentBackdrop();
-        if(!root.classList.contains("kdoc-react-host") || !global.setTimeout){ return; }
+        if(!root.classList.contains("kdoc-embedded-host") || !global.setTimeout){ return; }
         staleBackdropTimers.push(setTimeout(releaseStaleConsentBackdrop, 250));
         staleBackdropTimers.push(setTimeout(releaseStaleConsentBackdrop, 1000));
       }
@@ -1265,16 +1708,22 @@
       root.addEventListener("click", handleRootClick, true);
       root.addEventListener("focusin", handleFocusIn);
       root.addEventListener("focusout", handleFocusOut);
-      var keyTarget = scopedKeyboard ? root : document;
+      var keyTarget = document;
       keyTarget.addEventListener("keydown", handleCursorKey);
       if(wrapComments){
         wrapComments.addEventListener("change", handleWrapChange);
       }
       window.addEventListener("resize", handleResize);
+      initializeFromDOM();
       applyCommentWrap();
       applyFolds();
       scheduleConsentBackdropRelease();
       select(visibleFieldLines()[0] || lines[0]);
+      recordPerf("mount", mountStart, {
+        lines: lines.length,
+        fields: fieldStates.length,
+        complete: !!(viewSchema && viewSchema.complete)
+      });
 
       controller = {
         root: root,
