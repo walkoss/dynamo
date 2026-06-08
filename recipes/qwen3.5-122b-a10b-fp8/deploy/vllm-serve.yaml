@@ -72,6 +72,7 @@ spec:
                 --host 0.0.0.0 \
                 --port 8000 \
                 --tensor-parallel-size 2 \
+                --quantization fp8 \
                 --gpu-memory-utilization 0.9 \
                 --max-model-len 65537 \
                 --max-num-batched-tokens 32768 \
