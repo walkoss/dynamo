@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# vllm serve + embedding cache, NO frontend-decoding.
-# Images are decoded at the worker (standard vllm path); the ViT embedding
-# output is cached in the 4 GiB DRAM-backed EC. This isolates the EC effect
-# from the frontend-decoding effect — compare to:
-#   - deploy/vllm-serve.yaml     : no EC, no fd  (baseline)
-#   - deploy/dynamo-fd.yaml      : fd only, no EC
-#   - deploy/dynamo-fd-ec.yaml   : fd + EC
+# vllm serve + Dynamo embedding cache, NO frontend-decoding.
+# Plain Deployment (not DGD) — identical to vllm-serve.yaml but adds
+# --ec-transfer-config to enable the DynamoMultimodalEmbeddingCacheConnector.
+# Images are decoded at the server (standard vllm path); the ViT embedding
+# output is cached in the 4 GiB DRAM-backed EC.
 #
-# DGD operator auto-creates a Service named `qwen35-122b-vllm-serve-ec-frontend`
-# on port 8000 which perf.yaml targets.
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
+# Using Deployment (not DGD) avoids the TCP forwarding hop where the Rust
+# ingress has a 32 MiB message limit — with DGD the Frontend would forward
+# the full ~100 MB base64 payload to the worker.
+---
+apiVersion: v1
+kind: Service
 metadata:
   name: qwen35-122b-vllm-serve-ec
   labels:
@@ -20,53 +20,59 @@ metadata:
     app.kubernetes.io/component: vllm-serve-ec
     app.kubernetes.io/managed-by: dynamo-recipe
 spec:
-  pvcs:
-    - create: false
-      name: shared-model-cache
-  services:
-    Frontend:
-      componentType: frontend
-      envs:
-        - name: HF_HOME
-          value: /home/dynamo/.cache/huggingface
-        - name: DYN_REQUEST_PLANE
-          value: tcp
-        - name: DYN_HTTP_BODY_LIMIT_MB
-          value: "200"
-      extraPodSpec:
-        nodeSelector: ${HW_NODE_SELECTOR}
-        tolerations: ${HW_TOLERATIONS}
-        mainContainer:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: qwen3.5-122b-a10b
+    app.kubernetes.io/component: vllm-serve-ec
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen35-122b-vllm-serve-ec
+  labels:
+    app.kubernetes.io/name: qwen3.5-122b-a10b
+    app.kubernetes.io/component: vllm-serve-ec
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 2400
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qwen3.5-122b-a10b
+      app.kubernetes.io/component: vllm-serve-ec
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qwen3.5-122b-a10b
+        app.kubernetes.io/component: vllm-serve-ec
+        app.kubernetes.io/managed-by: dynamo-recipe
+    spec:
+      restartPolicy: Always
+      nodeSelector: ${HW_NODE_SELECTOR}
+      tolerations: ${HW_TOLERATIONS}
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: vllm
           image: ${VLLM_IMAGE}
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
-      replicas: 1
-      resources:
-        requests:
-          cpu: "4"
-          memory: 16Gi
-        limits:
-          cpu: "8"
-          memory: 32Gi
-      subComponentType: null
-
-    VllmWorker:
-      componentType: worker
-      extraPodSpec:
-        nodeSelector: ${HW_NODE_SELECTOR}
-        tolerations: ${HW_TOLERATIONS}
-        mainContainer:
           command:
             - /bin/bash
             - -lc
-          args:
             - |
               set -euo pipefail
               ulimit -l unlimited
-              python3 -m dynamo.vllm \
-                --model "${MODEL_NAME}" \
-                --enable-multimodal \
-                --multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}" \
+              exec vllm serve "${MODEL_NAME}" \
+                --host 0.0.0.0 \
+                --port 8000 \
                 --tensor-parallel-size 2 \
                 --quantization fp8 \
                 --gpu-memory-utilization 0.9 \
@@ -74,45 +80,69 @@ spec:
                 --max-num-batched-tokens 32768 \
                 --max-num-seqs 50 \
                 --mm-processor-cache-gb 60 \
+                --mm-processor-cache-type shm \
                 --mm-encoder-tp-mode data \
                 --enable-prefix-caching \
                 --enable-expert-parallel \
-                --dyn-tool-call-parser qwen3_coder \
-                --dyn-reasoning-parser qwen3 \
+                --enable-auto-tool-choice \
+                --tool-call-parser qwen3_coder \
+                --reasoning-parser qwen3 \
+                --chat-template-content-format openai \
                 --limit-mm-per-prompt '{"image": 5, "video": 0}' \
+                --enable-server-load-tracking \
+                --enable-prompt-tokens-details \
+                --enable-force-include-usage \
+                --enable-request-id-headers \
+                --ec-transfer-config '{"ec_role":"ec_both","ec_connector":"DynamoMultimodalEmbeddingCacheConnector","ec_connector_module_path":"dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector","ec_connector_extra_config":{"multimodal_embedding_cache_capacity_gb":4}}' \
                 --no-enable-log-requests
-          image: ${VLLM_IMAGE}
-          imagePullPolicy: IfNotPresent
           env:
             - name: MODEL_NAME
               value: "Qwen/Qwen3.5-122B-A10B"
             - name: HF_HOME
               value: /home/dynamo/.cache/huggingface
+            - name: VLLM_CACHE_ROOT
+              value: /home/dynamo/.cache/vllm
             - name: HF_HUB_OFFLINE
               value: "1"
-            - name: DYN_REQUEST_PLANE
-              value: tcp
-            - name: DYN_HTTP_BODY_LIMIT_MB
-              value: "200"
-            - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
-              value: nixl-write
-            - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
-              value: "4"
-            - name: DYN_MM_ALLOW_INTERNAL
-              value: "1"
-          workingDir: /workspace
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 150
+          resources:
+            requests:
+              cpu: "16"
+              memory: 128Gi
+              nvidia.com/gpu: "2"
+            limits:
+              cpu: "32"
+              memory: 256Gi
+              nvidia.com/gpu: "2"
           securityContext:
             capabilities:
               add:
                 - IPC_LOCK
                 - SYS_RESOURCE
-      replicas: 1
-      resources:
-        limits:
-          gpu: "2"
-        requests:
-          gpu: "2"
-      subComponentType: null
-      volumeMounts:
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /home/dynamo/.cache/huggingface
+            - name: shared-model-cache
+              mountPath: /home/dynamo/.cache/vllm
+              subPath: qwen35-122b-bench/vllm-cache-ec
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
         - name: shared-model-cache
-          mountPoint: /home/dynamo/.cache/huggingface
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
