@@ -51,6 +51,8 @@ test("KubeSchemaDoc consumes the shared kubectl-doc runtime instead of rendering
   assert.match(schemaDoc, /wrapComments,/);
   assert.match(schemaDoc, /preloadFullSchema = true/);
   assert.match(schemaDoc, /preloadFullSchema,/);
+  assert.match(schemaDoc, /autoFocus = true/);
+  assert.match(schemaDoc, /autoFocus,/);
   assert.match(schemaDoc, /loadFullSchema: loadFullSchema \?\? defaultLoadFullSchema\(data\)/);
   assert.match(schemaDoc, /const fullSchemaCache = new Map<string, Promise<KubeSchemaDocument> \| KubeSchemaDocument>\(\);/);
   assert.match(schemaDoc, /fullSchemaCache\.get\(source\)/);
@@ -92,6 +94,12 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /requestFullSchema\(\);/);
   assert.match(runtime, /scheduleFullSchemaPreload\(\);/);
   assert.match(runtime, /function cancelFullSchemaPreload\(\)/);
+  assert.match(runtime, /optionEnabled\(options, "autoFocus", root, "data-kdoc-auto-focus"\)/);
+  assert.match(runtime, /if\(destroyed\)\{\s*fullSchemaCallbacks = \[\];\s*return;\s*\}/s);
+  assert.match(runtime, /function scheduleInitialFocus\(\)/);
+  assert.match(runtime, /if\(!autoFocus \|\| !scopedKeyboard\)\{ return; \}/);
+  assert.match(runtime, /scheduleInitialFocus\(\);/);
+  assert.match(runtime, /function cancelInitialFocus\(\)/);
   assert.match(runtime, /requestFullSchema\(function\(\)\{ renderFullFoldProjection\(path, true\); \}\);/);
   assert.match(runtime, /foldStates\.push\(\{path: state\.path, expanded: expanded\(state\.line\)\}\);/);
   assert.match(runtime, /function restoreFoldSnapshot\(targetController, foldStates\)/);
