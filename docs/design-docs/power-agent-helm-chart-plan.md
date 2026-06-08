@@ -587,7 +587,7 @@ dev:
   # NVML actuator only. For DCGM dev mode (agent.actuator=dcgm),
   # override repository + tag to the production power-agent image,
   # which vendors the required pydcgm bindings and libdcgm.so:
-  #   --set dev.image.repository=nvcr.io/nvidia/dynamo/power-agent
+  #   --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent
   #   --set dev.image.tag=v1.1.0
   # Script-iteration via the ConfigMap mount still works against the
   # power-agent image (the /scripts mount overrides /app at runtime).
@@ -962,7 +962,7 @@ addresses a specific point in the v1.2 review-feedback cycle:
    > ships `pynvml` only and lacks `pydcgm` + `libdcgm.so`:
    >
    > ```bash
-   >   --set dev.image.repository=nvcr.io/nvidia/dynamo/power-agent \
+   >   --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent \
    >   --set dev.image.tag=v1.1.0
    > ```
    >

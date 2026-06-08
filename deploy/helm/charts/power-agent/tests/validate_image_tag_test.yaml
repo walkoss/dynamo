@@ -243,7 +243,7 @@ tests:
       - notFailedTemplate: {}
       - equal:
           path: spec.template.spec.containers[0].image
-          value: nvcr.io/nvidia/dynamo/power-agent:v1.1.0
+          value: nvcr.io/nvidia/ai-dynamo/power-agent:v1.1.0
 
   - it: should accept release tags that contain the substring "latest"
     set:
@@ -256,7 +256,7 @@ tests:
       - notFailedTemplate: {}
       - equal:
           path: spec.template.spec.containers[0].image
-          value: nvcr.io/nvidia/dynamo/power-agent:v1.0.0-latest-rc
+          value: nvcr.io/nvidia/ai-dynamo/power-agent:v1.0.0-latest-rc
 
   # ---------------------------------------------------------------
   # Happy paths: digest form renders the canonical repo@digest
@@ -273,7 +273,7 @@ tests:
       - notFailedTemplate: {}
       - equal:
           path: spec.template.spec.containers[0].image
-          value: nvcr.io/nvidia/dynamo/power-agent@sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890
+          value: nvcr.io/nvidia/ai-dynamo/power-agent@sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890
 
   - it: should render uppercase-hex digests verbatim (sha256 prefix is lowercase)
     set:
@@ -285,5 +285,5 @@ tests:
       - notFailedTemplate: {}
       - equal:
           path: spec.template.spec.containers[0].image
-          value: nvcr.io/nvidia/dynamo/power-agent@sha256:ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890
+          value: nvcr.io/nvidia/ai-dynamo/power-agent@sha256:ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890
 

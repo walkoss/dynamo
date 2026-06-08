@@ -194,7 +194,7 @@ loop: edit the scripts locally, update the ConfigMap, restart the Pod.
 >
 > ```bash
 > --set agent.actuator=dcgm \
-> --set dev.image.repository=nvcr.io/nvidia/dynamo/power-agent \
+> --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent \
 > --set dev.image.tag=v1.1.0
 > ```
 >
@@ -272,7 +272,7 @@ kubectl delete pod power-agent-dev -n $NAMESPACE
 | `dev.enabled` | Render dev Pod instead of DaemonSet (mutually exclusive) | `false` |
 | `dev.nodeName` | Required when `dev.enabled=true`; GPU node to pin to | `""` |
 | `dev.scriptConfigMap` | Externally created ConfigMap holding **both** `power_agent.py` and `actuator.py` (chart v1.1.0+; a ConfigMap with only `power_agent.py` will `ModuleNotFoundError: No module named 'actuator'` at pod start) | `dynamo-power-agent-script` |
-| `dev.image.repository` / `dev.image.tag` | Dev container image. Default `vllm-runtime` ships pynvml (NVML actuator works out of the box). **For DCGM dev mode**, override to the production power-agent image which vendors pydcgm + libdcgm.so: `--set dev.image.repository=nvcr.io/nvidia/dynamo/power-agent --set dev.image.tag=v1.1.0`. Script iteration via ConfigMap mount still works because `/scripts` overrides `/app` at runtime. | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1` |
+| `dev.image.repository` / `dev.image.tag` | Dev container image. Default `vllm-runtime` ships pynvml (NVML actuator works out of the box). **For DCGM dev mode**, override to the production power-agent image which vendors pydcgm + libdcgm.so: `--set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent --set dev.image.tag=v1.1.0`. Script iteration via ConfigMap mount still works because `/scripts` overrides `/app` at runtime. | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1` |
 | `dev.namespaceRestrictedOverride` | Set `true` to allow cluster-wide RBAC in dev mode (rare; for cross-namespace multi-pod testing only) | `false` |
 
 See [`values.yaml`](./values.yaml) for the full configuration surface and
