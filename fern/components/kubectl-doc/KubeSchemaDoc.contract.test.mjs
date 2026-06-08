@@ -77,6 +77,15 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /function mount\(root, options\)/);
   assert.match(runtime, /renderSchema\(root, options\.initialSchema, options\);/);
   assert.match(runtime, /root\.classList\.toggle\("kdoc-details-side-overlay", scopedKeyboard\);/);
+  assert.match(runtime, /function themeMatches\(value, mode\)/);
+  assert.match(runtime, /themeMatches\(mdTheme, "dark"\)/);
+  assert.match(runtime, /themeMatches\(mdTheme, "light"\)/);
+  assert.match(runtime, /new MutationObserver\(syncHostTheme\)/);
+  assert.match(runtime, /attributeFilter: \["class", "data-theme", "data-color-mode", "data-md-color-scheme", "data-kdoc-theme"\]/);
+  assert.match(runtime, /function replaceHash\(path\)/);
+  assert.match(runtime, /history\.pushState\(\{kubectlDocPath: path\}/);
+  assert.match(runtime, /window\.addEventListener\("hashchange", handleHashNavigation\)/);
+  assert.match(runtime, /focusPath\(path, \{scroll: scroll !== false, updateHash:false\}\)/);
   assert.match(runtime, /if\(scopedKeyboard && !hostHasFocus\(\)\)\{ return false; \}/);
   assert.match(runtime, /var keyTarget = document;/);
   assert.match(runtime, /keyTarget\.addEventListener\("keydown", handleCursorKey\);/);
@@ -108,7 +117,7 @@ test("shared runtime keeps Fern overlay, scoped keyboard, and lazy full-payload 
   assert.match(runtime, /function handleFocusIn\(\)\{\s*markHostFocused\(\);\s*requestFullSchema\(\);/s);
   assert.match(schemaDoc, /rootRef\.current\.innerHTML = "";/);
   assert.match(schemaDoc, /if \(snapshot\.filter\) \{\s*controller\.setFilter\?\.\(snapshot\.filter\);/s);
-  assert.match(schemaDoc, /if \(snapshot\.currentPath\) \{\s*controller\.focusPath\?\.\(snapshot\.currentPath, \{ scroll: false \}\);/s);
+  assert.match(schemaDoc, /if \(snapshot\.currentPath\) \{\s*controller\.focusPath\?\.\(snapshot\.currentPath, \{ scroll: false, updateHash: false \}\);/s);
   assert.match(runtime, /folds: foldSnapshot\(\)/);
   assert.match(runtime, /hasFocus: hostHasFocus\(\)/);
   assert.match(runtime, /setFocused: function\(value\)/);
