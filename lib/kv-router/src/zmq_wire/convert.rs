@@ -37,6 +37,7 @@ pub fn convert_event(
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             block_mm_infos,
             medium: _,
             is_eagle,
@@ -90,6 +91,7 @@ pub fn convert_event(
                         &num_block_tokens,
                         &block_hashes_u64,
                         lora_name.as_deref(),
+                        cache_namespace.as_deref(),
                         warning_count,
                         block_mm_infos.as_deref(),
                         is_eagle,
@@ -180,6 +182,7 @@ pub fn create_stored_block_from_parts(
     block_hash: u64,
     token_ids: &[u32],
     lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
     mm_extra_info: Option<BlockExtraInfo>,
     is_eagle: Option<bool>,
     image_token_id: Option<u32>,
@@ -200,6 +203,7 @@ pub fn create_stored_block_from_parts(
                 BlockHashOptions {
                     block_mm_infos: None,
                     lora_name,
+                    cache_namespace,
                     is_eagle,
                 },
             )[0]
@@ -212,6 +216,7 @@ pub fn create_stored_block_from_parts(
                 BlockHashOptions {
                     block_mm_infos: block_mm_infos.as_deref(),
                     lora_name,
+                    cache_namespace,
                     is_eagle,
                 },
             )[0]
@@ -240,6 +245,7 @@ pub fn create_stored_blocks(
     num_block_tokens: &[u64],
     block_hashes: &[u64],
     lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: Option<bool>,
@@ -286,6 +292,7 @@ pub fn create_stored_blocks(
             *block_hash_it,
             tokens,
             lora_name,
+            cache_namespace,
             mm_extra_info,
             is_eagle,
             image_token_id,
@@ -323,6 +330,7 @@ mod normalize_tests {
             0xabcd,
             &vllm_tokens,
             None,
+            None,
             Some(mm_info),
             None,
             Some(image_token_id),
@@ -357,10 +365,11 @@ mod normalize_tests {
             None,
             None,
             None,
+            None,
             Some(151655),
         );
         let without =
-            create_stored_block_from_parts(block_size, 0x1, &tokens, None, None, None, None);
+            create_stored_block_from_parts(block_size, 0x1, &tokens, None, None, None, None, None);
         assert_eq!(with_img.tokens_hash, without.tokens_hash);
     }
 }

@@ -60,6 +60,7 @@ struct BestMatchArgs<'a> {
     update_states: bool,
     return_routing_hashes: bool,
     lora_name: Option<String>,
+    cache_namespace: Option<String>,
     priority_jump: f64,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -80,6 +81,7 @@ impl KvPushRouter {
                 args.update_states,
                 args.return_routing_hashes,
                 args.lora_name,
+                args.cache_namespace,
                 args.priority_jump,
                 args.expected_output_tokens,
                 args.pinned_worker,
@@ -131,6 +133,7 @@ impl KvPushRouter {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
+        let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = routing
             .and_then(|routing| routing.priority_jump)
             .unwrap_or(0.0);
@@ -154,6 +157,7 @@ impl KvPushRouter {
                     update_states: !is_query_only,
                     return_routing_hashes,
                     lora_name,
+                    cache_namespace,
                     priority_jump,
                     expected_output_tokens,
                     pinned_worker: None,
@@ -185,6 +189,7 @@ impl KvPushRouter {
 
             return Ok(selection);
         };
+        let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
 
         let pinned_worker = resolve_pinned_worker_rank(
             pinned_worker_id,
@@ -222,6 +227,7 @@ impl KvPushRouter {
             update_states: !is_query_only,
             return_routing_hashes,
             lora_name,
+            cache_namespace,
             priority_jump,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),

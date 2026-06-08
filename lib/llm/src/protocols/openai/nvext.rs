@@ -20,6 +20,7 @@ pub const HEADER_DP_RANK: &str = "x-dp-rank";
 /// Alias for data-parallel rank routing.
 pub const HEADER_DP_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 /// Apply routing overrides from HTTP headers to nvext.
@@ -29,6 +30,7 @@ const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
 /// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
 /// - `x-prefill-dp-rank` -> `prefill_dp_rank`
+/// - `x-tenant-id` -> `cache_salt`
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -55,8 +57,17 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
+    let tenant_id = headers
+        .get(HEADER_TENANT_ID)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
 
-    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
+    if worker_id.is_none()
+        && prefill_id.is_none()
+        && dp_rank.is_none()
+        && prefill_dp_rank.is_none()
+        && tenant_id.is_none()
     {
         return nvext;
     }
@@ -74,6 +85,9 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     }
     if let Some(rank) = prefill_dp_rank {
         ext.prefill_dp_rank = Some(rank);
+    }
+    if let Some(salt) = tenant_id {
+        ext.cache_salt = Some(salt);
     }
     Some(ext)
 }
@@ -628,6 +642,7 @@ impl NvExtBuilder {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderValue;
     use validator::Validate;
 
     use super::*;
@@ -688,6 +703,30 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, Some(100));
         assert_eq!(nv_ext.decode_worker_id, Some(200));
         assert!(nv_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tenant_header_populates_cache_salt() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, HeaderValue::from_static("tenant-a"));
+
+        let nv_ext = apply_header_routing_overrides(None, &headers).unwrap();
+
+        assert_eq!(nv_ext.cache_salt.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn test_tenant_header_overrides_body_cache_salt() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, HeaderValue::from_static("tenant-header"));
+        let nv_ext = NvExt::builder()
+            .cache_salt("tenant-body".to_string())
+            .build()
+            .unwrap();
+
+        let nv_ext = apply_header_routing_overrides(Some(nv_ext), &headers).unwrap();
+
+        assert_eq!(nv_ext.cache_salt.as_deref(), Some("tenant-header"));
     }
 
     #[test]

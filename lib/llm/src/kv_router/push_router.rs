@@ -220,6 +220,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .await?
             } else {
                 let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+                let cache_namespace = request
+                    .routing
+                    .as_ref()
+                    .and_then(|r| r.cache_namespace.clone());
                 let mut tokens_with_hashes = TokensWithHashes::new(
                     routing_parts.token_ids.to_vec(),
                     self.chooser.block_size(),
@@ -230,6 +234,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
                 if let Some(lora_name) = lora_name {
                     tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+                }
+                if let Some(cache_namespace) = cache_namespace {
+                    tokens_with_hashes = tokens_with_hashes.with_cache_namespace(cache_namespace);
                 }
                 cancel_on_stop(
                     request_context.as_ref(),

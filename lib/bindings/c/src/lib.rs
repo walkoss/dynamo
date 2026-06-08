@@ -233,6 +233,7 @@ fn kv_event_create_stored_block_from_parts(
         kv_block_size,
         BlockHashOptions {
             lora_name,
+            cache_namespace: None,
             ..Default::default()
         },
     )[0];
@@ -458,6 +459,7 @@ impl RouterHandles {
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
@@ -473,6 +475,7 @@ impl RouterHandles {
                 block_mm_infos,
                 update_states,
                 lora_name,
+                cache_namespace,
                 priority_jump,
                 allowed_worker_ids,
                 routing_constraints,
@@ -519,6 +522,7 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
@@ -550,6 +554,7 @@ impl RouterHandles {
                 false,
                 false,
                 None,
+                cache_namespace,
                 priority_jump,
                 None,
                 None,
@@ -601,6 +606,15 @@ fn extract_priority_jump(
         .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
         .map(|v| v.max(0.0))
         .unwrap_or(0.0)
+}
+
+fn extract_cache_namespace(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> Option<String> {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|nvext| nvext.cache_salt.clone())
 }
 
 /// Opaque handle for the router pair
@@ -974,7 +988,7 @@ pub unsafe extern "C" fn add_request(
 
             // Compute overlap_blocks using the public method
             let overlap_blocks = match decode_router
-                .get_overlap_blocks(&tokens, None, worker, None)
+                .get_overlap_blocks(&tokens, None, worker, None, None)
                 .await
             {
                 Ok(overlap) => overlap,
@@ -994,6 +1008,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
+                    None, // cache_namespace
                     Some(&router_config_override),
                 )
                 .await;
@@ -1185,7 +1200,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 unsafe fn preprocess_request(
     handles: &RouterHandles,
     request_json: *const c_char,
-) -> Result<(Vec<u32>, f64, RoutingConstraints), QueryRouterResult> {
+) -> Result<(Vec<u32>, Option<String>, f64, RoutingConstraints), QueryRouterResult> {
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
@@ -1209,6 +1224,7 @@ unsafe fn preprocess_request(
         };
 
     let priority_jump = extract_priority_jump(&request);
+    let cache_namespace = extract_cache_namespace(&request);
     let routing_constraints = request
         .nvext
         .as_ref()
@@ -1240,7 +1256,12 @@ unsafe fn preprocess_request(
         "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
     );
 
-    Ok((token_ids, priority_jump, routing_constraints))
+    Ok((
+        token_ids,
+        cache_namespace,
+        priority_jump,
+        routing_constraints,
+    ))
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1326,7 +1347,7 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump, routing_constraints) =
+    let (tokens, cache_namespace, priority_jump, routing_constraints) =
         match unsafe { preprocess_request(handles, request_json) } {
             Ok(t) => t,
             Err(code) => return code,
@@ -1341,6 +1362,7 @@ pub unsafe extern "C" fn route_prefill_request(
                 None,
                 false,
                 None,
+                cache_namespace,
                 priority_jump,
                 allowed_worker_ids,
                 routing_constraints,
@@ -1406,7 +1428,7 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump, routing_constraints) =
+    let (tokens, cache_namespace, priority_jump, routing_constraints) =
         match unsafe { preprocess_request(handles, request_json) } {
             Ok(t) => t,
             Err(code) => return code,
@@ -1419,6 +1441,7 @@ pub unsafe extern "C" fn route_decode_request(
             .query_decode_worker(
                 &tokens,
                 is_disaggregated,
+                cache_namespace,
                 priority_jump,
                 allowed_worker_ids,
                 routing_constraints,

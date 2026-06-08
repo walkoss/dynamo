@@ -826,6 +826,7 @@ impl OpenAIPreprocessor {
                 }),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
+                cache_namespace: nvext.cache_salt.clone(),
                 allowed_worker_ids: None,
                 session_control: nvext.session_control.clone(),
                 routing_constraints: nvext.routing_constraints.clone(),

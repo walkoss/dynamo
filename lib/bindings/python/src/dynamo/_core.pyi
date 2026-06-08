@@ -368,6 +368,7 @@ def compute_block_hash_for_seq(
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
     is_eagle: Optional[bool] = None,
+    cache_namespace: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -1007,6 +1008,7 @@ class KvEventPublisher:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -2583,6 +2585,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         routing_constraints: Optional[RoutingConstraints] = None,
+        cache_namespace: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2614,6 +2617,7 @@ class KvRouter:
         token_ids: List[int],
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.
@@ -2644,6 +2648,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         include_shared: bool = True,
+        cache_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get per-worker KV overlap by storage tier.

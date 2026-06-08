@@ -36,6 +36,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         assert_eq!(stored.block_hash.0, blk_hash);
@@ -43,6 +44,37 @@ mod test_event_processing {
             compute_block_hash_for_seq(&token_ids, 4, BlockHashOptions::default())[0];
         assert_eq!(stored.tokens_hash, expected_hash);
         assert!(stored.mm_extra_info.is_none());
+    }
+
+    #[test]
+    fn test_create_stored_block_from_parts_with_cache_salt() {
+        let kv_block_size = 4;
+        let token_ids = vec![10, 20, 30, 40];
+
+        let stored = create_stored_block_from_parts(
+            kv_block_size,
+            0xdead_beef,
+            &token_ids,
+            None,
+            Some("tenant-a"),
+            None,
+            None,
+            None,
+        );
+
+        let expected_hash = compute_block_hash_for_seq(
+            &token_ids,
+            kv_block_size,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-a"),
+                ..Default::default()
+            },
+        )[0];
+        let base_hash =
+            compute_block_hash_for_seq(&token_ids, kv_block_size, BlockHashOptions::default())[0];
+
+        assert_eq!(stored.tokens_hash, expected_hash);
+        assert_ne!(stored.tokens_hash, base_hash);
     }
 
     // ---------------------------------------------------------------------
@@ -61,6 +93,7 @@ mod test_event_processing {
             &token_ids,
             &num_block_tokens,
             &block_hashes,
+            None,
             None,
             &Arc::new(AtomicU32::new(0)),
             None,
@@ -87,6 +120,7 @@ mod test_event_processing {
             &num_block_tokens,
             &block_hashes,
             None,
+            None,
             &warning_count,
             None,
             None,
@@ -111,6 +145,7 @@ mod test_event_processing {
             block_size: 4,
             medium: None,
             lora_name: None,
+            cache_namespace: None,
             block_mm_infos: None,
             is_eagle: None,
             group_idx: None,
@@ -142,6 +177,7 @@ mod test_event_processing {
             block_size: 4,
             medium: None,
             lora_name: None,
+            cache_namespace: None,
             block_mm_infos: None,
             is_eagle: None,
             group_idx: None,
@@ -155,6 +191,7 @@ mod test_event_processing {
             block_size: 4,
             medium: None,
             lora_name: Some("my-lora".to_string()),
+            cache_namespace: None,
             block_mm_infos: None,
             is_eagle: None,
             group_idx: None,
@@ -209,6 +246,7 @@ mod test_event_processing {
             block_size: 4,
             medium: None,
             lora_name: None,
+            cache_namespace: None,
             block_mm_infos: None,
             is_eagle: None,
             group_idx: None,
@@ -222,6 +260,7 @@ mod test_event_processing {
             block_size: 4,
             medium: None,
             lora_name: None,
+            cache_namespace: None,
             block_mm_infos: None,
             is_eagle: None,
             group_idx: None,
@@ -1102,6 +1141,7 @@ mod tests_startup_helpers {
                 block_size: 4,
                 medium: None,
                 lora_name: None,
+                cache_namespace: None,
                 block_mm_infos: None,
                 is_eagle: None,
                 group_idx: None,
