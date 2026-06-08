@@ -1,0 +1,90 @@
+From: GMS team <gms@example.com>
+Subject: [PATCH] v1 BlockPool: expose evict-cached-block callback
+
+Adds a public registration API on `BlockPool` so external KV connectors
+can subscribe to "cached block has just been evicted" events. Today the
+only signal is the private `_maybe_evict_cached_block` method, which
+forces connectors (e.g. GMS's evict-to-host adapter) to monkey-patch
+the class — fragile across minor vLLM releases.
+
+The change:
+
+  - Adds `BlockPool.register_evict_callback(callback)` where
+    `callback` is `Callable[[KVCacheBlock, BlockHashWithGroupId], None]`.
+  - `_maybe_evict_cached_block` invokes every registered callback right
+    BEFORE the call returns True (i.e. before the block_hash mapping
+    is dropped and before `block.reset_hash()`), so the callback can
+    use `block.block_hash` to compute byte offsets.
+
+This is purely additive; existing callers see no behavior change when
+no callbacks are registered. Cost is one `if self._evict_callbacks:`
+check per eviction, identical to the existing `self.metrics_collector`
+gate already in this function.
+
+Use case: external host-tier KV offload (engine evicts → connector
+captures bytes to host RAM/NVMe before vLLM reuses the slot).
+
+Signed-off-by: Maksim Khadkevich <mkhadkevich@nvidia.com>
+Co-authored-by: Claude
+
+---
+ vllm/v1/core/block_pool.py | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/vllm/v1/core/block_pool.py b/vllm/v1/core/block_pool.py
+index 0000000..0000000 100644
+--- a/vllm/v1/core/block_pool.py
++++ b/vllm/v1/core/block_pool.py
+@@ -1,7 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ from collections.abc import Iterable, Sequence
+-from typing import Any
++from typing import Any, Callable
+
+ from vllm.distributed.kv_events import (
+     MEDIUM_GPU,
+@@ -181,6 +181,29 @@ class BlockPool:
+
+         self.metrics_collector = metrics_collector
+
++        # External evict-to-host hook: callbacks fire when a cached
++        # block is evicted (right before the block_hash mapping is
++        # cleared, so callbacks can still read `block.block_hash`).
++        # Use this from KVConnectors that mirror GPU KV to host RAM.
++        self._evict_callbacks: list[
++            Callable[[KVCacheBlock, BlockHashWithGroupId], None]
++        ] = []
++
++    def register_evict_callback(
++        self,
++        callback: Callable[[KVCacheBlock, BlockHashWithGroupId], None],
++    ) -> None:
++        """Register a callback fired on each prefix-cache eviction.
++
++        The callback receives `(block, block_hash_with_group_id)` and
++        is invoked synchronously inside `_maybe_evict_cached_block`,
++        before the block's hash is cleared. Throwing from the callback
++        will propagate out of the eviction path; connectors should
++        catch and log their own exceptions to avoid stalling the
++        scheduler.
++        """
++        self._evict_callbacks.append(callback)
++
+     def get_cached_block(
+         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
+     ) -> list[KVCacheBlock] | None:
+@@ -371,6 +394,11 @@ class BlockPool:
+             # eviction is not needed
+             return False
+
++        # External evict-to-host hook: fire BEFORE reset_hash so
++        # callbacks can still read block.block_hash.
++        for cb in self._evict_callbacks:
++            cb(block, block_hash)
++
+         block.reset_hash()
+
+         if self.enable_kv_cache_events:
+--
+2.42.0
