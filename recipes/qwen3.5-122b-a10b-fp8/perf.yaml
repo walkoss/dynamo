@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared aiperf benchmark pod template for all 3 configs (vllm-serve,
+# dynamo-fd, dynamo-fd-ec). run-benchmark.sh exports the per-config
+# values (${BENCH_POD}, ${BENCH_FRONTEND}, ${BENCH_RUN_LABEL}) plus
+# the per-hardware ones (${HW_NODE_SELECTOR}, ${HW_TOLERATIONS}) and
+# pipes this file through `envsubst` before `kubectl apply`.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${BENCH_POD}
+  labels:
+    app.kubernetes.io/name: qwen3.5-122b-a10b
+    app.kubernetes.io/component: benchmark
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  restartPolicy: Never
+  nodeSelector: ${HW_NODE_SELECTOR}
+  tolerations: ${HW_TOLERATIONS}
+  containers:
+    - name: benchmark
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+          ulimit -n 1048576
+          ulimit -u 65536
+
+          apt update && apt install -y --no-install-recommends curl jq git
+
+          # Use latest released aiperf (>=0.9 includes session_id + HF image-byte-dict fix).
+          pip install --no-cache-dir aiperf
+          python -c "import aiperf; print('aiperf', aiperf.__version__ if hasattr(aiperf,'__version__') else 'installed', 'OK')"
+
+          echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          until curl -s "http://${FRONTEND}:8000/v1/models" \
+              | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "Model '${MODEL_NAME}' is ready."
+
+          INPUT_FILE="${DATASET_DIR}/30u_8t_5w_8000word_base64.jsonl"
+          if [[ ! -f "${INPUT_FILE}" ]]; then
+            echo "Dataset not found: ${INPUT_FILE}" >&2
+            exit 1
+          fi
+
+          RUN_DIR="${ARTIFACT_BASE_DIR}/${RUN_LABEL}"
+          mkdir -p "${RUN_DIR}"
+          echo "Running benchmark; artifacts → ${RUN_DIR}"
+
+          # single_turn (NOT multi_turn): each jsonl row is one request.
+          # session_id in the jsonl ensures same-user turns are issued in
+          # causal order so prefix-cache hits land across the 8 turns.
+          aiperf profile \
+            --model "${MODEL_NAME}" \
+            --input-file "${INPUT_FILE}" \
+            --custom-dataset-type single_turn \
+            --url "http://${FRONTEND}:8000" \
+            --streaming \
+            --ui-type none \
+            --request-count "${REQUEST_COUNT}" \
+            --concurrency "${CONCURRENCY}" \
+            --request-rate-mode constant \
+            --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+            --artifact-dir "${RUN_DIR}" \
+            --extra-inputs "max_tokens:${MAX_TOKENS}" \
+            --extra-inputs "min_tokens:${MAX_TOKENS}" \
+            --extra-inputs "ignore_eos:true"
+
+          if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
+            rm -fv "${RUN_DIR}/inputs.json" || true
+          else
+            echo "KEEP_INPUTS_JSON=1 → retaining $(du -sh ${RUN_DIR}/inputs.json 2>/dev/null | cut -f1) inputs.json"
+          fi
+
+          echo "Run complete. Artifacts in ${RUN_DIR}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: "Qwen/Qwen3.5-122B-A10B"
+        - name: FRONTEND
+          value: ${BENCH_FRONTEND}
+        - name: RUN_LABEL
+          value: ${BENCH_RUN_LABEL}
+        - name: MAX_TOKENS
+          value: "1024"
+        - name: REQUEST_COUNT
+          value: "240"  # 30 users × 8 turns
+        - name: CONCURRENCY
+          value: "30"
+        - name: WARMUP_REQUEST_COUNT
+          value: "2"
+        - name: DATASET_DIR
+          value: /perf-cache/datasets
+        - name: ARTIFACT_BASE_DIR
+          value: /perf-cache/artifacts/qwen35_122b
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "1800"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "1800"
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+        limits:
+          cpu: "16"
+          memory: 32Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPath: /perf-cache
+          subPath: qwen35-122b-bench/perf-cache
+  volumes:
+    - name: shared-model-cache
+      persistentVolumeClaim:
+        claimName: shared-model-cache
