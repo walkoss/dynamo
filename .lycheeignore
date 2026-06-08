@@ -18,6 +18,10 @@
 # Slow from GitHub runners and not part of Dynamo-owned documentation.
 ^https://martinfowler\.com/articles/practical-test-pyramid\.html
 
+# NVIDIA docs site intermittently returns 404 to GitHub runners for these
+# deployment-guide paths (verified 2026-06-08; links work in-browser).
+^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/
+
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
