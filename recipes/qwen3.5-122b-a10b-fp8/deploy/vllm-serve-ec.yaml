@@ -92,6 +92,8 @@ spec:
               value: "1"
             - name: DYN_REQUEST_PLANE
               value: tcp
+            - name: DYN_HTTP_BODY_LIMIT_MB
+              value: "200"
             - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
               value: nixl-write
             - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
