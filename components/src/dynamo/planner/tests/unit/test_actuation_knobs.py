@@ -389,9 +389,9 @@ class TestGetComponentPodsLabelSelector:
         deployment = {
             "metadata": {"name": "test-dgd"},
             "spec": {
-                "services": {
-                    "VllmPrefillWorker": {"replicas": 1, "subComponentType": "prefill"},
-                }
+                "components": [
+                    {"name": "VllmPrefillWorker", "replicas": 1, "type": "prefill"},
+                ]
             },
         }
         mock_kube_api.get_graph_deployment.return_value = deployment
@@ -408,9 +408,9 @@ class TestGetComponentPodsLabelSelector:
         deployment = {
             "metadata": {"name": "test-dgd"},
             "spec": {
-                "services": {
-                    "VllmDecodeWorker": {"replicas": 1, "subComponentType": "decode"},
-                }
+                "components": [
+                    {"name": "VllmDecodeWorker", "replicas": 1, "type": "decode"},
+                ]
             },
         }
         mock_kube_api.get_graph_deployment.return_value = deployment
@@ -425,7 +425,7 @@ class TestGetComponentPodsLabelSelector:
         """If the DGD has no matching component, return [] instead of raising."""
         deployment = {
             "metadata": {"name": "test-dgd"},
-            "spec": {"services": {}},
+            "spec": {"components": []},
         }
         mock_kube_api.get_graph_deployment.return_value = deployment
 

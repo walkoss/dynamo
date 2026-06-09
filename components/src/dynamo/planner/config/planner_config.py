@@ -355,10 +355,12 @@ class PlannerConfig(BaseModel):
     )
     prefill_engine_gpu_power_limit: int = Field(
         default=SLAPlannerDefaults.prefill_engine_gpu_power_limit,
+        ge=1,
         description="Per-GPU power cap (watts) applied to prefill replicas via NVML.",
     )
     decode_engine_gpu_power_limit: int = Field(
         default=SLAPlannerDefaults.decode_engine_gpu_power_limit,
+        ge=1,
         description="Per-GPU power cap (watts) applied to decode replicas via NVML.",
     )
     power_agent_safe_default_watts: Optional[int] = Field(
