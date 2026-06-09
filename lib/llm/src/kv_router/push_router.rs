@@ -38,7 +38,7 @@ use crate::{
         TokenIdType,
         common::{
             llm_backend::LLMEngineOutput,
-            preprocessor::RoutingHints,
+            preprocessor::{GmsPlacementInfo, RoutingHints},
             timing::{RequestPhase, RequestTracker},
         },
     },
@@ -59,6 +59,7 @@ struct WorkerSelection {
     effective_overlap_blocks: f64,
     cached_tokens: usize,
     routing_hashes: Option<RoutingDecisionHashes>,
+    gms_placement: Option<Box<GmsPlacementInfo>>,
     /// Whether the scheduler is tracking this request (add_request or
     /// find_best_match_details with update_states=true was called).
     scheduler_tracked: bool,
@@ -354,6 +355,8 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
+                gms_placement,
+                ..
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -361,6 +364,7 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
+                gms_placement,
                 scheduler_tracked: args.scheduler_tracked,
             }),
             FindBestMatchOutcome::Backpressure {
@@ -680,6 +684,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             effective_overlap_blocks,
             cached_tokens,
             routing_hashes,
+            gms_placement,
             scheduler_tracked,
         } = selection;
 
@@ -780,6 +785,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
+        backend_input.gms_placement = gms_placement.map(|placement| *placement);
         let updated_request = context.map(|_| backend_input);
 
         // Record prefill start right before pushing to backend (OnceLock: first call wins).
