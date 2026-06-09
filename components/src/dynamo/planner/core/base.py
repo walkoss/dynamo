@@ -186,6 +186,14 @@ class NativePlannerBase:
         self._cumulative_gpu_hours: float = 0.0
         self._last_gpu_hours_update_ts: Optional[float] = None
 
+        # Power-annotation sweep throttle (Phase 1). The sweep reconciles pod
+        # power-limit annotations against K8s; running it every tick is needless
+        # apiserver load, so run() throttles it to
+        # config.power_annotation_interval_seconds and forces a per-tick sweep
+        # for one interval after each scale-up (when new pods appear).
+        self._last_power_annotation_sweep_s: float = 0.0
+        self._force_power_annotations_until_s: float = 0.0
+
         # Diagnostics recorder
         self._recorder = DiagnosticsRecorder(config=config)
 
@@ -755,11 +763,15 @@ class NativePlannerBase:
 
         Reads the actual annotation from each Pod object returned by
         get_component_pods(). Only PATCHes when annotation is missing or wrong.
-        K8s is the source of truth — no local cache.
+        K8s is the source of truth — no local cache. The DGD is read once per
+        sweep and shared across the prefill/decode pod lookups.
 
-        Called after _apply_effects() on every tick so newly-created pods
-        pick up the cap within one tick, and AIC-driven cap changes (Phase 3+)
-        propagate to all running pods automatically.
+        Performs one full reconcile sweep. The caller
+        (_should_sweep_power_annotations in run()) throttles this to
+        config.power_annotation_interval_seconds in steady state and forces a
+        per-tick sweep for one interval after a scale-up, so newly-created pods
+        pick up the cap promptly while steady-state apiserver load stays
+        bounded. AIC-driven cap changes (Phase 3+) propagate on the next sweep.
 
         Skipped in advisory mode — annotations are a cluster-visible side
         effect on customer-owned Pod objects, so advisory runs must observe
@@ -773,14 +785,28 @@ class NativePlannerBase:
         if not isinstance(self.connector, KubernetesConnector):
             return
 
+        if not (self.require_prefill or self.require_decode):
+            return
+
+        # One DGD read for the whole sweep: resolving prefill and decode pods
+        # each needs the deployment, so fetch it once and reuse it rather than
+        # letting each get_component_pods() issue its own GET.
+        deployment = self.connector.kube_api.get_graph_deployment(
+            self.connector.graph_deployment_name
+        )
+
         pods_and_limits: list[tuple] = []
         if self.require_prefill:
-            for pod in self.connector.get_component_pods(SubComponentType.PREFILL):
+            for pod in self.connector.get_component_pods(
+                SubComponentType.PREFILL, deployment=deployment
+            ):
                 pods_and_limits.append(
                     (pod, str(self.config.prefill_engine_gpu_power_limit))
                 )
         if self.require_decode:
-            for pod in self.connector.get_component_pods(SubComponentType.DECODE):
+            for pod in self.connector.get_component_pods(
+                SubComponentType.DECODE, deployment=deployment
+            ):
                 pods_and_limits.append(
                     (pod, str(self.config.decode_engine_gpu_power_limit))
                 )
@@ -805,6 +831,57 @@ class NativePlannerBase:
                     pod.metadata.name,
                     e,
                 )
+
+    def _scaling_up(self, effects: PlannerEffects) -> bool:
+        """True when this tick's decision raises a managed replica count.
+
+        A scale-up means the operator will create new worker pods, which start
+        without the power-limit annotation; the caller uses this to force a
+        prompt annotation sweep instead of waiting out the steady-state
+        throttle. Mirrors the delta logic in _log_decision_summary; scale-downs
+        and holds return False because they create no pods.
+        """
+        decision = effects.scale_to
+        if decision is None:
+            return False
+        sm = self.state_machine
+        if (
+            decision.num_prefill is not None
+            and decision.num_prefill > sm._num_p_workers
+        ):
+            return True
+        if decision.num_decode is not None and decision.num_decode > sm._num_d_workers:
+            return True
+        return False
+
+    def _should_sweep_power_annotations(
+        self, now_s: float, effects: PlannerEffects
+    ) -> bool:
+        """Decide whether to run a power-annotation sweep this tick.
+
+        Throttles steady-state sweeps to at most one per
+        ``power_annotation_interval_seconds`` (a sweep costs a DGD read + a pod
+        list per managed component, so per-tick sweeps multiply apiserver
+        load). A scale-up (re)opens a force window of one interval during which
+        every tick sweeps, so freshly-created pods are annotated without waiting
+        out the throttle. Updates the sweep bookkeeping as a side effect when it
+        returns True.
+        """
+        if not self.config.enable_power_awareness or self.config.advisory:
+            return False
+        if self._scaling_up(effects):
+            self._force_power_annotations_until_s = (
+                now_s + self.config.power_annotation_interval_seconds
+            )
+        within_force_window = now_s < self._force_power_annotations_until_s
+        throttle_elapsed = (
+            now_s - self._last_power_annotation_sweep_s
+            >= self.config.power_annotation_interval_seconds
+        )
+        if within_force_window or throttle_elapsed:
+            self._last_power_annotation_sweep_s = now_s
+            return True
+        return False
 
     def _publish_power_budget_metrics(self, num_p: int, num_d: int) -> None:
         """Emit power budget gauges (Phase 1, dashboard observability only).
@@ -974,7 +1051,10 @@ class NativePlannerBase:
                 self._publish_inventory_and_gpu_hours(tick_input)
                 effects = self.state_machine.on_tick(next_tick, tick_input)
                 await self._apply_effects(effects)
-                await self._apply_power_annotations()  # Phase 1: annotate pods with GPU power limit
+                # Phase 1: reconcile per-GPU power-limit annotations, throttled
+                # in steady state and forced for one interval after a scale-up.
+                if self._should_sweep_power_annotations(now, effects):
+                    await self._apply_power_annotations()
                 self._report_diagnostics(next_tick, effects.diagnostics)
                 self._log_decision_summary(effects)
 

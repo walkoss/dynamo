@@ -311,7 +311,9 @@ class KubernetesConnector(PlannerConnector):
 
         return prefill_gpu_count, decode_gpu_count
 
-    def get_component_pods(self, sub_component_type: SubComponentType) -> list:
+    def get_component_pods(
+        self, sub_component_type: SubComponentType, deployment: Optional[dict] = None
+    ) -> list:
         """Return the list of Pod objects for the given sub-component (prefill/decode).
 
         Uses the operator's canonical pod labels (see
@@ -320,8 +322,14 @@ class KubernetesConnector(PlannerConnector):
           - nvidia.com/dynamo-component=<service-key> (e.g. VllmPrefillWorker)
         Returns an empty list when the service cannot be resolved (e.g. the DGD
         has no matching component — handled gracefully by the caller).
+
+        ``deployment`` lets a caller that already fetched the DGD this tick
+        (e.g. a power-annotation sweep resolving both prefill and decode) reuse
+        that snapshot, avoiding a redundant apiserver GET per role. When None,
+        the current DGD is fetched.
         """
-        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        if deployment is None:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
         try:
             service = get_component_from_type_or_name(deployment, sub_component_type)
         except Exception:

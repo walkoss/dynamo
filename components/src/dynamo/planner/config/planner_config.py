@@ -373,6 +373,18 @@ class PlannerConfig(BaseModel):
             "(e.g. 500W on H200 SXM, 490W on H100 SXM)."
         ),
     )
+    power_annotation_interval_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Minimum seconds between steady-state power-annotation sweeps. Each "
+            "sweep issues a DGD read plus a pod list per managed component "
+            "(prefill/decode) to reconcile the per-GPU power-limit annotation, so "
+            "running it on every tick multiplies apiserver load. After a scale-up "
+            "the planner ignores this throttle and sweeps every tick for one "
+            "interval so freshly-created pods are annotated promptly."
+        ),
+    )
 
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(

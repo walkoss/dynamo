@@ -411,7 +411,7 @@ class TestApplyPowerAnnotationsLive:
         # the orchestrator dispatches a real patch_pod_annotation call.
         original_get_component_pods = connector.get_component_pods
 
-        def _stubbed_get_component_pods(sub_component_type):
+        def _stubbed_get_component_pods(sub_component_type, deployment=None):
             from dynamo.planner.config.defaults import SubComponentType as _Sct
 
             if sub_component_type == _Sct.DECODE:

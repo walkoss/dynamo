@@ -26,6 +26,7 @@ from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.core.budget import POWER_ANNOTATION_KEY
+from dynamo.planner.core.types import PlannerEffects, ScalingDecision
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -250,7 +251,7 @@ class TestApplyPowerAnnotations:
         pod_p = _mock_pod("prefill-0")  # no annotation
         pod_d = _mock_pod("decode-0")  # no annotation
 
-        def get_pods(sub_type):
+        def get_pods(sub_type, deployment=None):
             if sub_type == SubComponentType.PREFILL:
                 return [pod_p]
             return [pod_d]
@@ -271,6 +272,39 @@ class TestApplyPowerAnnotations:
         }
         assert calls["prefill-0"] == "320"
         assert calls["decode-0"] == "280"
+
+    @pytest.mark.asyncio
+    async def test_dual_role_sweep_reads_deployment_once(
+        self, connector, mock_kube_api
+    ):
+        """A prefill+decode sweep must issue exactly one DGD GET (not one per role).
+
+        Uses the real KubernetesConnector.get_component_pods so the shared-
+        deployment plumbing is exercised end to end: 1 get_graph_deployment +
+        2 list_pods_by_label, instead of the pre-optimization 2 + 2.
+        """
+        deployment = {
+            "metadata": {"name": "test-dgd"},
+            "spec": {
+                "components": [
+                    {"name": "VllmPrefillWorker", "type": "prefill"},
+                    {"name": "VllmDecodeWorker", "type": "decode"},
+                ]
+            },
+        }
+        mock_kube_api.get_graph_deployment.return_value = deployment
+        mock_kube_api.list_pods_by_label.return_value = []
+
+        planner = _bare_planner(
+            connector,
+            _power_config(),
+            require_prefill=True,
+            require_decode=True,
+        )
+        await planner._apply_power_annotations()
+
+        assert mock_kube_api.get_graph_deployment.call_count == 1
+        assert mock_kube_api.list_pods_by_label.call_count == 2
 
     @pytest.mark.asyncio
     async def test_skips_entirely_when_power_awareness_disabled(
@@ -428,10 +462,26 @@ class TestGetComponentPodsLabelSelector:
             "spec": {"components": []},
         }
         mock_kube_api.get_graph_deployment.return_value = deployment
-
         result = connector.get_component_pods(SubComponentType.PREFILL)
-
         assert result == []
+
+    def test_reuses_passed_deployment_without_refetch(self, connector, mock_kube_api):
+        """When given a deployment, get_component_pods must not GET it again."""
+        deployment = {
+            "metadata": {"name": "test-dgd"},
+            "spec": {
+                "components": [
+                    {"name": "VllmPrefillWorker", "replicas": 1, "type": "prefill"},
+                ]
+            },
+        }
+        mock_kube_api.list_pods_by_label.return_value = []
+
+        connector.get_component_pods(SubComponentType.PREFILL, deployment=deployment)
+
+        mock_kube_api.get_graph_deployment.assert_not_called()
+        call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
+        assert "nvidia.com/dynamo-component=VllmPrefillWorker" in call_args
 
 
 # ===========================================================================
@@ -632,3 +682,96 @@ class TestListFrontendPods:
         mock_kube_api.list_pods_by_label.return_value = []
         result = connector.list_frontend_pods()
         assert result == []
+
+
+# ===========================================================================
+# Knob 2 — Per-GPU power cap (TGP) — sweep throttle / force-after-scale-up
+# ===========================================================================
+
+
+def _throttle_config(interval=60.0, enable=True, advisory=False):
+    cfg = Mock()
+    cfg.enable_power_awareness = enable
+    cfg.advisory = advisory
+    cfg.power_annotation_interval_seconds = interval
+    return cfg
+
+
+def _throttle_planner(config, p_workers=2, d_workers=2):
+    """A bare planner wired only with the state _should_sweep... touches."""
+    planner = object.__new__(NativePlannerBase)
+    planner.config = config
+    planner._last_power_annotation_sweep_s = 0.0
+    planner._force_power_annotations_until_s = 0.0
+    planner._state_machine = Mock(_num_p_workers=p_workers, _num_d_workers=d_workers)
+    return planner
+
+
+class TestPowerAnnotationSweepThrottle:
+    """NativePlannerBase._should_sweep_power_annotations — apiserver-load throttle.
+
+    A sweep costs a DGD read + a pod list per managed component, so steady-state
+    sweeps are throttled to power_annotation_interval_seconds while scale-ups
+    force a prompt pass so new pods are annotated without waiting out the
+    throttle.
+    """
+
+    def test_first_tick_sweeps(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0))
+        assert planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        assert planner._last_power_annotation_sweep_s == 1000.0
+
+    def test_throttled_within_interval(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0))
+        assert planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        # 30s later, no scaling — must be throttled, bookkeeping unchanged.
+        assert not planner._should_sweep_power_annotations(1030.0, PlannerEffects())
+        assert planner._last_power_annotation_sweep_s == 1000.0
+
+    def test_sweeps_again_after_interval(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0))
+        assert planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        assert planner._should_sweep_power_annotations(1061.0, PlannerEffects())
+        assert planner._last_power_annotation_sweep_s == 1061.0
+
+    def test_scale_up_forces_sweep_inside_throttle(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0), p_workers=2)
+        # Establish a recent steady-state sweep.
+        assert planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        scale_up = PlannerEffects(scale_to=ScalingDecision(num_prefill=4))
+        # 5s later (well inside the 60s throttle) a scale-up still forces a sweep.
+        assert planner._should_sweep_power_annotations(1005.0, scale_up)
+
+    def test_force_window_persists_after_scale_up(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0), d_workers=1)
+        planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        scale_up = PlannerEffects(scale_to=ScalingDecision(num_decode=3))
+        assert planner._should_sweep_power_annotations(1005.0, scale_up)
+        # Subsequent ticks with no new decision still sweep until the window
+        # (opened at 1005 + 60 = 1065) closes — catches pods created post-scale.
+        assert planner._should_sweep_power_annotations(1020.0, PlannerEffects())
+        assert planner._should_sweep_power_annotations(1064.0, PlannerEffects())
+        assert not planner._should_sweep_power_annotations(1066.0, PlannerEffects())
+
+    def test_scale_down_does_not_force(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0), p_workers=4)
+        planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        scale_down = PlannerEffects(scale_to=ScalingDecision(num_prefill=1))
+        # No new pods on scale-down — throttle still applies inside the interval.
+        assert not planner._should_sweep_power_annotations(1010.0, scale_down)
+
+    def test_hold_decision_does_not_force(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0), p_workers=2)
+        planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        hold = PlannerEffects(scale_to=ScalingDecision(num_prefill=2))
+        assert not planner._should_sweep_power_annotations(1010.0, hold)
+
+    def test_advisory_never_sweeps(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0, advisory=True))
+        # Interval elapsed and a scale-up present, yet advisory mutates nothing.
+        scale_up = PlannerEffects(scale_to=ScalingDecision(num_prefill=4))
+        assert not planner._should_sweep_power_annotations(5000.0, scale_up)
+
+    def test_disabled_never_sweeps(self):
+        planner = _throttle_planner(_throttle_config(interval=60.0, enable=False))
+        assert not planner._should_sweep_power_annotations(5000.0, PlannerEffects())
