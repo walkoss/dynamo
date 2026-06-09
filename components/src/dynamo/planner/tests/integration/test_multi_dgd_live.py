@@ -19,9 +19,9 @@ that single-DGD tests cannot reach:
                     driver state (not via mocks)
 
 Path-A pre-conditions (see `examples/multi-dgd-live-test/README.md`):
-    1. dpp-dev-env AKS cluster, $KUBECONFIG = ~/.kube/dynamo-kubeconfig
-    2. namespace `kaim-dynamo-system` with `nvcr-imagepullsecret`
-    3. one 8-GPU A100 node labelled `power-test/node=kaim`
+    1. an AKS test cluster, $KUBECONFIG = ~/.kube/dynamo-kubeconfig
+    2. namespace `dynamo-power-test` with `nvcr-imagepullsecret`
+    3. one 8-GPU A100 node labelled `power-test/node=target`
     4. dynamo-platform operator installed in the namespace
     5. power-agent DS rolled out on the test node (NVML or DCGM actuator)
     6. vllm-dgd-a, vllm-dgd-b, vllm-dgd-c DGDs created and Ready
@@ -87,7 +87,7 @@ if not _RUN_LIVE:
 if not _TEST_NODE:
     pytest.fail(
         "RUN_MULTI_DGD_LIVE=1 was set but TEST_NODE env var is empty. "
-        "Set TEST_NODE to the 8-GPU node labelled `power-test/node=kaim`.",
+        "Set TEST_NODE to the 8-GPU node labelled `power-test/node=target`.",
         pytrace=False,
     )
 
@@ -98,9 +98,9 @@ try:
     from kubernetes.stream import stream as k8s_stream
 
     try:
-        # Preferred: run inside a kaim-dynamo-system pod with a SA that can
-        # list pods + DGDs cluster-wide (the planner-dev pod in dpp-dev-env
-        # is the canonical home once the planner image has #9683).
+        # Preferred: run inside a dynamo-power-test pod with a SA that can
+        # list pods + DGDs cluster-wide (the planner-dev pod in the test
+        # cluster is the canonical home once the planner image has #9683).
         k8s_config.load_incluster_config()
     except ConfigException:
         # Fallback: run from a workstation that has $KUBECONFIG set to
@@ -115,7 +115,7 @@ except Exception as exc:  # noqa: BLE001
         pytrace=False,
     )
 
-_NAMESPACE = os.environ.get("POD_NAMESPACE", "kaim-dynamo-system")
+_NAMESPACE = os.environ.get("POD_NAMESPACE", "dynamo-power-test")
 _DGD_NAMES = ("vllm-dgd-a", "vllm-dgd-b", "vllm-dgd-c")
 
 # Topology source of truth — must match §8.2 of multi-tenant-test.md.
@@ -987,7 +987,7 @@ class TestMultiPodConflict:
     Historical note (PR #9683 Finding #7) — two non-options:
 
       1. ``NVIDIA_VISIBLE_DEVICES=<uuid>`` / ``<index>``. AKS in CDI
-         device mode (dpp-dev-env default) rejects both with
+         device mode (the test cluster's default) rejects both with
          ``unresolvable CDI devices management.nvidia.com/gpu=*`` and
          refuses to admit the pod.
 
@@ -1081,7 +1081,7 @@ class TestMultiPodConflict:
                 "annotations": {_POWER_ANNOTATION_KEY: "200"},
             },
             "spec": {
-                "nodeSelector": {"power-test/node": "kaim"},
+                "nodeSelector": {"power-test/node": "target"},
                 "tolerations": [
                     {
                         "key": "nvidia.com/gpu",
