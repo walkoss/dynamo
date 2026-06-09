@@ -41,12 +41,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	)
 
 	tests := []struct {
-		name         string
-		deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
-		groveEnabled bool
-		wantErr      bool
-		errMsg       string
-		errContains  bool
+		name                   string
+		deployment             *nvidiacomv1alpha1.DynamoGraphDeployment
+		groveEnabled           bool
+		wantErr                bool
+		errMsg                 string
+		errContains            bool
+		preserveRuntimeVersion bool
 	}{
 		{
 			name: "valid deployment with services",
@@ -65,6 +66,70 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name: "missing runtime version with no image",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas: &validReplicas,
+						},
+					},
+				},
+			},
+			wantErr:                true,
+			errMsg:                 "spec.services[main].runtimeVersion is required because extraPodSpec.mainContainer.image is not set; set runtimeVersion explicitly for SHA/custom tags",
+			preserveRuntimeVersion: true,
+		},
+		{
+			name: "missing runtime version with custom image tag",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas: &validReplicas,
+							ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+								MainContainer: &corev1.Container{Image: "vllm-runtime:latest"},
+							},
+						},
+					},
+				},
+			},
+			wantErr:                true,
+			errMsg:                 `spec.services[main].runtimeVersion is required because extraPodSpec.mainContainer.image "vllm-runtime:latest" does not contain a parseable semver tag; set runtimeVersion explicitly for SHA/custom tags`,
+			preserveRuntimeVersion: true,
+		},
+		{
+			name: "runtime version disagrees with image tag",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {
+							Replicas:       &validReplicas,
+							RuntimeVersion: "1.1",
+							ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+								MainContainer: &corev1.Container{Image: "vllm-runtime:1.2.0"},
+							},
+						},
+					},
+				},
+			},
+			wantErr:                true,
+			errMsg:                 `spec.services[main].runtimeVersion has invalid value "1.1": runtime version "1.1" does not match image tag runtime version "1.2" derived from extraPodSpec.mainContainer.image "vllm-runtime:1.2.0"`,
+			preserveRuntimeVersion: true,
 		},
 		{
 			name:         "priorityClassName is valid on Grove pathway",
@@ -2035,6 +2100,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if !tt.preserveRuntimeVersion {
+				defaultRuntimeVersionForValidationTests(tt.deployment)
+			}
 			validator := NewDynamoGraphDeploymentValidator(tt.deployment, tt.groveEnabled)
 			_, err := validator.Validate(context.Background())
 
@@ -2059,6 +2127,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func defaultRuntimeVersionForValidationTests(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+	if dgd == nil {
+		return
+	}
+	for _, service := range dgd.Spec.Services {
+		if service != nil && service.RuntimeVersion == "" {
+			service.RuntimeVersion = "1.1"
+		}
 	}
 }
 
