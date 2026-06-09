@@ -153,6 +153,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                                 data: KvCacheEventData::Cleared,
                                 dp_rank: event.dp_rank,
                             },
+                            None,
                         )
                         .await;
                         batching_state.next_publish_id += 1;

@@ -20,7 +20,10 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (
+    HandlerBase,
+    TRTLLMEngineQuiesceController,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -99,6 +102,33 @@ async def test_mark_request_finished_is_idempotent():
     # Extra call when count is already 0 must not underflow
     await handler._mark_request_finished()
     assert handler._inflight_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_trtllm_quiesce_fails_when_collective_rpc_missing():
+    controller = TRTLLMEngineQuiesceController(SimpleNamespace(llm=SimpleNamespace()))
+
+    with pytest.raises(RuntimeError, match="_collective_rpc"):
+        await controller.quiesce(["kv_cache"])
+
+    assert controller.is_quiesced is False
+
+
+@pytest.mark.asyncio
+async def test_trtllm_quiesce_fails_closed_for_unsupported_multi_rank_rpc():
+    def collective_rpc(*args, **kwargs):
+        raise NotImplementedError(
+            "MPI collective_rpc only supports model_world_size == 1"
+        )
+
+    controller = TRTLLMEngineQuiesceController(
+        SimpleNamespace(llm=SimpleNamespace(_collective_rpc=collective_rpc))
+    )
+
+    with pytest.raises(RuntimeError, match="multi-rank KV cache control"):
+        await controller.quiesce(["kv_cache"])
+
+    assert controller.is_quiesced is False
 
 
 # ---------------------------------------------------------------------------

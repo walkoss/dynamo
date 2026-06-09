@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, StorageTier};
+use dynamo_kv_router::protocols::{GmsPlacementEventData, KvCacheEvent, RouterEvent, StorageTier};
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::transports::nats::NatsQueue;
 
@@ -59,6 +59,7 @@ pub(super) async fn emit<P: RouterEventSink>(
     worker_id: u64,
     storage_tier: StorageTier,
     event: KvCacheEvent,
+    _gms_placement: Option<GmsPlacementEventData>,
 ) {
     emit_router_event(
         publisher,

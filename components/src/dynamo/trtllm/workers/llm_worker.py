@@ -49,6 +49,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.common.utils.topology import apply_topology_config
+from dynamo.gms_router_policy import resolve_env_gms_daemon_socket
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
@@ -634,6 +635,13 @@ async def init_llm_worker(
             config.enable_local_indexer
             and config.disaggregation_mode != DisaggregationMode.DECODE
         )
+        gms_daemon_socket = resolve_env_gms_daemon_socket(
+            "GMS_TRTLLM_DAEMON_SOCKET",
+            default_when_cross_node="/tmp/gms.sock",
+        )
+        if gms_daemon_socket:
+            runtime_config.set_gms_placement_enabled()
+            logging.info("Publishing GMS placement capability to discovery")
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks
         # Need to name ADP as `data_parallel_size` for parity with other frameworks

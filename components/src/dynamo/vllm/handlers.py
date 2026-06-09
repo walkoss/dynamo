@@ -57,6 +57,10 @@ from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
+from dynamo.gms_router_policy import (
+    maybe_fetch_gms_placement,
+    resolve_vllm_gms_daemon_socket,
+)
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -2302,6 +2306,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         mm_processor_kwargs = self._get_mm_processor_kwargs(request)
+
+        await maybe_fetch_gms_placement(
+            request,
+            resolve_vllm_gms_daemon_socket(self.engine_client.vllm_config),
+            logger=logger,
+            request_id=request_id,
+        )
 
         multi_modal_data: Dict[str, Any] | None = None
         pre_rendered: Dict[str, Any] | None = None

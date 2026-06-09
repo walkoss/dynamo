@@ -59,6 +59,8 @@ struct WorkerSelection {
     effective_overlap_blocks: f64,
     cached_tokens: usize,
     routing_hashes: Option<RoutingDecisionHashes>,
+    /// Optional GMS placement metadata that lets the selected worker fetch KV
+    /// from a busier peer selected by the router's reference policy.
     gms_placement: Option<Box<GmsPlacementInfo>>,
     /// Whether the scheduler is tracking this request (add_request or
     /// find_best_match_details with update_states=true was called).
@@ -355,18 +357,34 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
+                gms_transfer,
                 gms_placement,
                 ..
-            } => Ok(WorkerSelection {
-                instance_id: worker.worker_id,
-                dp_rank: worker.dp_rank,
-                overlap_amount: overlap_blocks,
-                effective_overlap_blocks,
-                cached_tokens,
-                routing_hashes,
-                gms_placement,
-                scheduler_tracked: args.scheduler_tracked,
-            }),
+            } => {
+                if let Some(transfer) = gms_transfer {
+                    tracing::debug!(
+                        request_id = %args.context_id,
+                        source_worker_id = transfer.source_worker.worker_id,
+                        source_dp_rank = transfer.source_worker.dp_rank,
+                        destination_worker_id = transfer.destination_worker.worker_id,
+                        destination_dp_rank = transfer.destination_worker.dp_rank,
+                        source_overlap_blocks = transfer.source_overlap_blocks,
+                        source_load_blocks = transfer.source_load_blocks,
+                        destination_load_blocks = transfer.destination_load_blocks,
+                        "Routing request with GMS KV transfer placement"
+                    );
+                }
+                Ok(WorkerSelection {
+                    instance_id: worker.worker_id,
+                    dp_rank: worker.dp_rank,
+                    overlap_amount: overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                    gms_placement,
+                    scheduler_tracked: args.scheduler_tracked,
+                })
+            }
             FindBestMatchOutcome::Backpressure {
                 reason,
                 queued_isl_tokens,
@@ -785,7 +803,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
-        backend_input.gms_placement = gms_placement.map(|placement| *placement);
+        if backend_input.gms_placement.is_none() {
+            backend_input.gms_placement = gms_placement.map(|placement| *placement);
+        }
         let updated_request = context.map(|_| backend_input);
 
         // Record prefill start right before pushing to backend (OnceLock: first call wins).
