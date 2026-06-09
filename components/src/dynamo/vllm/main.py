@@ -91,6 +91,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
+from dynamo.gms_router_policy import resolve_vllm_gms_daemon_socket
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
@@ -946,6 +947,10 @@ async def register_vllm_model(
     stream_interval = getattr(config.engine_args, "stream_interval", None)
     if stream_interval is not None:
         runtime_config.set_engine_specific("stream_interval", str(stream_interval))
+
+    if resolve_vllm_gms_daemon_socket(vllm_config):
+        runtime_config.set_gms_placement_enabled()
+        logging.info("Publishing GMS placement capability to discovery")
 
     runtime_config.data_parallel_start_rank = dp_range[0]
     runtime_config.data_parallel_size = dp_range[1]

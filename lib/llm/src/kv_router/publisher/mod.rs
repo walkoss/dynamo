@@ -347,22 +347,23 @@ impl KvEventPublisher {
         storage_tier: StorageTier,
         dp_rank: DpRank,
     ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        let event_data = match &gms_placement {
+            GmsPlacementEventData::Stored(_) => KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: Vec::new(),
+            }),
+            GmsPlacementEventData::Removed(_) => KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: Vec::new(),
+            }),
+            GmsPlacementEventData::Cleared => KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: Vec::new(),
+            }),
+        };
         let event = KvCacheEvent {
             event_id: self.next_event_id(),
+            data: event_data,
             dp_rank,
-            data: match &gms_placement {
-                GmsPlacementEventData::Stored(_) => KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    start_position: None,
-                    blocks: Vec::new(),
-                }),
-                GmsPlacementEventData::Removed(_) => KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: Vec::new(),
-                }),
-                GmsPlacementEventData::Cleared => KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: Vec::new(),
-                }),
-            },
         };
         let placement_event = PlacementEvent::with_gms_placement(
             Placement::local_worker(self.worker_id, dp_rank, storage_tier),
