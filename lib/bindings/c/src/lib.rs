@@ -680,6 +680,9 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_bool("DYN_ROUTER_TRACK_PREFILL_TOKENS") {
         cfg.router_track_prefill_tokens = v;
     }
+    if let Some(v) = env_bool("DYN_ROUTER_GMS_DECODE_TRANSFER") {
+        cfg.router_gms_decode_transfer = v;
+    }
     if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
         cfg.router_queue_threshold = Some(v);
     }
@@ -695,6 +698,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_active_blocks = cfg.router_track_active_blocks,
         router_track_output_blocks = cfg.router_track_output_blocks,
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
+        router_gms_decode_transfer = cfg.router_gms_decode_transfer,
         router_queue_threshold = ?cfg.router_queue_threshold,
         router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
         queue_depth_tiers_unbounded = cfg.router_queue_by_incoming_missing_isl.is_unbounded(),
