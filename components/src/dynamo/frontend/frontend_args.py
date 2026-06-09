@@ -25,6 +25,7 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     env_or_default,
 )
+from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
 
@@ -95,6 +96,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
         self.apply_load_aware_preset()
 
         if self.bulwark_gateway_endpoint:
+            if self.namespace and not self.namespace_prefix:
+                self.namespace = get_worker_namespace(self.namespace)
             if not self.bulwark_gateway_endpoint.startswith("dyn://"):
                 raise ValueError(
                     "--bulwark-gateway-endpoint must be a dyn://namespace.component.endpoint path"
