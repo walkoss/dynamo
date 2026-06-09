@@ -601,6 +601,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         Annotated {
@@ -649,6 +650,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             data: Some(data),
@@ -1129,6 +1131,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         // Wrap it in Annotated and create a stream
