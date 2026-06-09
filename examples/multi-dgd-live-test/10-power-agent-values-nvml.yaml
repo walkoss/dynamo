@@ -3,7 +3,7 @@
 #
 # Power Agent helm values override — NVML actuator pass.
 # Use with: helm upgrade --install power-agent deploy/helm/charts/power-agent \
-#               --namespace kaim-dynamo-system -f 10-power-agent-values-nvml.yaml
+#               --namespace dynamo-power-test -f 10-power-agent-values-nvml.yaml
 
 image:
   # IMAGE NOTE — ephemeral ttl.sh tag (24h TTL). If `helm install` fails
@@ -14,7 +14,7 @@ image:
   # upstream (Dockerfile DCGM tag + bindings path + missing logger.py shim).
   # This NVML-pass build used DCGM 3.3.9 bindings (no DCGM-mode in
   # this pass, so the 3.3.9 vs 4.5+ struct gap is irrelevant here).
-  repository: ttl.sh/dynamo-pa-kaim-4c3c606
+  repository: ttl.sh/dynamo-pa-4c3c606
   tag: "24h"
   pullPolicy: IfNotPresent
 
@@ -40,7 +40,7 @@ nodeSelector:
   # Pin to the test node ONLY (otherwise the DS schedules on every GPU
   # node and clobbers other users' caps).
   nvidia.com/gpu.present: "true"
-  power-test/node: "kaim"
+  power-test/node: "target"
 
 tolerations:
   - key: nvidia.com/gpu
@@ -64,7 +64,7 @@ daemonset:
       maxUnavailable: 1
 
 state:
-  hostPath: /var/lib/dynamo-power-agent-kaim-test
+  hostPath: /var/lib/dynamo-power-agent-test
 
 # FINDING (chart default too tight for live testing): the chart default
 # limits.memory of 128 MiB is enough for the agent's steady-state reconcile

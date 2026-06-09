@@ -8,7 +8,7 @@
 #   2. The dynamo-graph-deployment-name + dynamo-component-type +
 #      dynamo-sub-component-type labels the agent and the test fixtures look for.
 #
-# Note: dpp-dev AKS uses CDI device mode — NVIDIA_VISIBLE_DEVICES is NOT
+# Note: this AKS test cluster uses CDI device mode — NVIDIA_VISIBLE_DEVICES is NOT
 # honoured as a free-form index selector for non-"all" values (the runtime
 # attempts `management.nvidia.com/gpu=<id>` lookup which has no entry in the
 # CDI registry, and fails the pod with `unresolvable CDI devices`). So we go
@@ -24,7 +24,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: vllm-dgd-a-prefill
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     purpose: power-aware-multi-dgd-test
     nvidia.com/dynamo-graph-deployment-name: vllm-dgd-a
@@ -35,7 +35,7 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector:
-    power-test/node: kaim
+    power-test/node: target
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -75,7 +75,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: vllm-dgd-a-decode
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     purpose: power-aware-multi-dgd-test
     nvidia.com/dynamo-graph-deployment-name: vllm-dgd-a
@@ -86,7 +86,7 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector:
-    power-test/node: kaim
+    power-test/node: target
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -126,7 +126,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: vllm-dgd-b-prefill
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     purpose: power-aware-multi-dgd-test
     nvidia.com/dynamo-graph-deployment-name: vllm-dgd-b
@@ -137,7 +137,7 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector:
-    power-test/node: kaim
+    power-test/node: target
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -177,7 +177,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: vllm-dgd-b-decode
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     purpose: power-aware-multi-dgd-test
     nvidia.com/dynamo-graph-deployment-name: vllm-dgd-b
@@ -188,7 +188,7 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector:
-    power-test/node: kaim
+    power-test/node: target
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -228,7 +228,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: vllm-dgd-c-decode
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     purpose: power-aware-multi-dgd-test
     nvidia.com/dynamo-graph-deployment-name: vllm-dgd-c
@@ -239,7 +239,7 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector:
-    power-test/node: kaim
+    power-test/node: target
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists

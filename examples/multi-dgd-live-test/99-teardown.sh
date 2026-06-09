@@ -8,12 +8,12 @@
 #   Path A (production shape): real DGDs + Dynamo operator
 #   Path B (stub-workers):     raw pods from 50-stub-workers.yaml
 # Pre-2026-05-21 only handled Path A; the Path B teardown lines were
-# added after the live run on dpp-dev-env AKS.
+# added after the live run on the AKS test cluster.
 
 set -u   # NOT set -e — we want best-effort delete even if some objects are
          # already gone or in Terminating state.
 
-NS=${NS:-kaim-dynamo-system}
+NS=${NS:-dynamo-power-test}
 TEST_NODE=${TEST_NODE:-}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -78,7 +78,7 @@ fi
 #     Image: any image with pynvml available — we reuse the NVML-mode
 #     Power Agent image since it's already in the cluster cache from
 #     phase 2.
-PA_IMAGE=${PA_IMAGE:-ttl.sh/dynamo-pa-kaim-4c3c606:24h}
+PA_IMAGE=${PA_IMAGE:-ttl.sh/dynamo-pa-4c3c606:24h}
 if [[ -n "$TEST_NODE" ]]; then
     echo "=== Restoring + verifying caps on $TEST_NODE ==="
     cat <<EOF | kubectl apply -n "$NS" -f - 2>&1 | head -1

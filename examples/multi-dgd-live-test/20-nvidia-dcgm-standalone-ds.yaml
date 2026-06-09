@@ -5,7 +5,7 @@
 # for what GPU Operator's `dcgm.enabled=true` would deploy cluster-wide.
 #
 # WHY this exists:
-#   The dpp-dev-env AKS cluster has only `nvidia-dcgm-exporter` (embedded
+#   This AKS test cluster has only `nvidia-dcgm-exporter` (embedded
 #   DCGM via cgo) — no standalone hostengine listening on TCP 5555. The
 #   Power Agent's DCGM actuator (`agent.actuator=dcgm`) connects to a
 #   hostengine over TCP via `pydcgm.dcgm_agent.dcgmConnect()`. Without
@@ -28,18 +28,18 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: nvidia-dcgm-standalone
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: nvidia-dcgm-standalone
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     app: nvidia-dcgm-standalone
 spec:
   # Headless service — Power Agent connects via cluster DNS:
-  #   nvidia-dcgm-standalone.kaim-dynamo-system.svc.cluster.local:5555
+  #   nvidia-dcgm-standalone.dynamo-power-test.svc.cluster.local:5555
   # The DS only schedules on $TEST_NODE (single replica), so DNS resolves
   # to exactly one pod IP.
   clusterIP: None
@@ -55,7 +55,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: nvidia-dcgm-standalone
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     app: nvidia-dcgm-standalone
 spec:
@@ -71,7 +71,7 @@ spec:
       # Same nodeSelector as Power Agent — only the test node.
       nodeSelector:
         nvidia.com/gpu.present: "true"
-        power-test/node: "kaim"
+        power-test/node: "target"
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
@@ -111,7 +111,7 @@ spec:
           # PR findings #1, #2, #5 in README.md track the upstream fixes
           # (durable image registration on dynamoci.azurecr.io + the
           # Dockerfile patches that would land along with them).
-          image: ttl.sh/dynamo-dcgm45-kaim:24h
+          image: ttl.sh/dynamo-dcgm45:24h
           imagePullPolicy: IfNotPresent
           # Bind on all interfaces inside the pod (cluster DNS routes traffic
           # to the pod IP). Port 5555 = DCGM default.

@@ -1,7 +1,7 @@
 # Multi-DGD live test artifacts
 
 Concrete YAMLs + helm values that realize §8 of
-`docs/design-docs/multi-tenant-test.md` on the AKS `dpp-dev-env` cluster.
+`docs/design-docs/multi-tenant-test.md` on an 8-GPU A100 AKS node.
 This scaffold pairs with the live test at
 `components/src/dynamo/planner/tests/integration/test_multi_dgd_live.py`
 — the `prefill_engine_gpu_power_limit` / `decode_engine_gpu_power_limit`
@@ -22,13 +22,13 @@ Pick the one that matches the state of your environment:
 | Defer-until | #9683 lands on main + operator deployed | n/a — runs today |
 
 Path A is the "design-doc" reproduction. Path B is what we actually ran
-on 2026-05-21 (see [§ Live-run record](#2026-05-21-live-run-record-on-dpp-dev-env-aks)
+on 2026-05-21 (see [§ Live-run record](#2026-05-21-live-run-record-on-an-8-gpu-a100-aks-node)
 below) and is the most ergonomic way to smoke-test the Power Agent on a
 cluster that doesn't yet have the planner-infra wiring.
 
 ## Topology
 
-Single 8-GPU A100 node (`$TEST_NODE`, labelled `power-test/node=kaim`):
+Single 8-GPU A100 node (`$TEST_NODE`, labelled `power-test/node=target`):
 
 | DGD | Planner type | Shape | GPUs | Cap (W) |
 |---|---|---|---|---|
@@ -54,8 +54,8 @@ on clusters where you don't want to deploy a DCGM hostengine.
 
 ```bash
 export KUBECONFIG=$HOME/.kube/dynamo-kubeconfig
-export TEST_NODE=aks-a100a-36888584-vmss000002   # or whichever idle 8-GPU node
-export NS=kaim-dynamo-system
+export TEST_NODE=<your-8gpu-node>   # or whichever idle 8-GPU node
+export NS=dynamo-power-test
 export TEST_FILE=components/src/dynamo/planner/tests/integration/test_multi_dgd_live.py
 ```
 
@@ -64,7 +64,7 @@ export TEST_FILE=components/src/dynamo/planner/tests/integration/test_multi_dgd_
 ```bash
 # 1.1 namespace + label test node
 kubectl apply -f 00-namespace.yaml
-kubectl label node $TEST_NODE power-test/node=kaim --overwrite
+kubectl label node $TEST_NODE power-test/node=target --overwrite
 
 # 1.2 Dynamo operator (§8.3.A in the design doc).
 #     Chart name is `dynamo-platform` (see deploy/helm/charts/platform/Chart.yaml).
@@ -247,8 +247,8 @@ so the namespace stays clean after the test.
 
 ```bash
 # On viking-prod-216 (or any NGC-authenticated Linux host):
-cd /tmp/kaim && git clone <dynamo-repo-url> dynamo   # or use an existing checkout
-cd /tmp/kaim/dynamo
+cd /tmp/dynamo-build && git clone <dynamo-repo-url> dynamo   # or use an existing checkout
+cd /tmp/dynamo-build/dynamo
 
 # ----- Image 1: Power Agent with DCGM 4.5.1 bindings -----
 # Why not the Dockerfile default? The pinned 4.2.3-2 tag does NOT exist
@@ -256,15 +256,15 @@ cd /tmp/kaim/dynamo
 # the pydcgm bindings in the NGC image are missing logger.py (Finding #6);
 # and actuator.py uses c_dcgmDeviceConfig_v2 which only exists in 4.x
 # (Finding #5). The block below works around all four:
-mkdir -p /tmp/kaim/pa-dcgm45-build
+mkdir -p /tmp/dynamo-build/pa-dcgm45-build
 sed 's|/usr/local/dcgm/bindings/python3|/usr/share/datacenter-gpu-manager-4/bindings/python3|g' \
-    components/power_agent/Dockerfile > /tmp/kaim/pa-dcgm45-build/Dockerfile
+    components/power_agent/Dockerfile > /tmp/dynamo-build/pa-dcgm45-build/Dockerfile
 cp components/power_agent/power_agent.py components/power_agent/actuator.py \
-    /tmp/kaim/pa-dcgm45-build/
+    /tmp/dynamo-build/pa-dcgm45-build/
 
 # logger.py shim — the NGC DCGM image's pydcgm imports `logger` but the
 # upstream logger.py is in a separate source tree that isn't packaged.
-cat > /tmp/kaim/pa-dcgm45-build/logger.py <<'PYEOF'
+cat > /tmp/dynamo-build/pa-dcgm45-build/logger.py <<'PYEOF'
 import logging as _logging
 _LOG = _logging.getLogger("dcgm.bindings")
 debug = _LOG.debug
@@ -280,32 +280,32 @@ awk '/COPY --from=dcgm-vendor \/vendor\/dcgm-lib    \/opt\/dcgm\/lib/ {
         print
         print "COPY logger.py /opt/dcgm/python/logger.py"
         next
-      } { print }' /tmp/kaim/pa-dcgm45-build/Dockerfile > /tmp/Dockerfile.new \
-    && mv /tmp/Dockerfile.new /tmp/kaim/pa-dcgm45-build/Dockerfile
+      } { print }' /tmp/dynamo-build/pa-dcgm45-build/Dockerfile > /tmp/Dockerfile.new \
+    && mv /tmp/Dockerfile.new /tmp/dynamo-build/pa-dcgm45-build/Dockerfile
 
-cd /tmp/kaim/pa-dcgm45-build
+cd /tmp/dynamo-build/pa-dcgm45-build
 docker buildx build --load \
-    -t ttl.sh/dynamo-pa-kaim-dcgm45-v2:24h \
+    -t ttl.sh/dynamo-pa-dcgm45-v2:24h \
     --build-arg DCGM_IMAGE=nvcr.io/nvidia/cloud-native/dcgm:4.5.1-1-ubuntu22.04 \
     -f Dockerfile .
-docker push ttl.sh/dynamo-pa-kaim-dcgm45-v2:24h
+docker push ttl.sh/dynamo-pa-dcgm45-v2:24h
 
 # ----- Image 2: NVML-only Power Agent build (DCGM 3.3.9 bindings) -----
 # Used by Phase 2 (NVML pass) when you don't need to exercise the DCGM
 # code path. Cheaper to build because we skip the path patch.
 docker buildx build --load \
-    -t ttl.sh/dynamo-pa-kaim-4c3c606:24h \
+    -t ttl.sh/dynamo-pa-4c3c606:24h \
     --build-arg DCGM_IMAGE=nvcr.io/nvidia/cloud-native/dcgm:3.3.9-1-ubuntu22.04 \
     -f components/power_agent/Dockerfile components/power_agent
-docker push ttl.sh/dynamo-pa-kaim-4c3c606:24h
+docker push ttl.sh/dynamo-pa-4c3c606:24h
 
 # ----- Image 3: DCGM 4.5.1 hostengine -----
 # The cluster's nvcr-imagepullsecret 403s on cloud-native/dcgm
 # (Finding — see below). Retag through ttl.sh.
 docker pull nvcr.io/nvidia/cloud-native/dcgm:4.5.1-1-ubuntu22.04
 docker tag  nvcr.io/nvidia/cloud-native/dcgm:4.5.1-1-ubuntu22.04 \
-            ttl.sh/dynamo-dcgm45-kaim:24h
-docker push ttl.sh/dynamo-dcgm45-kaim:24h
+            ttl.sh/dynamo-dcgm45:24h
+docker push ttl.sh/dynamo-dcgm45:24h
 ```
 
 If you bump any source file between successive builds you MUST also bump
@@ -317,14 +317,14 @@ image.
 
 ```bash
 export KUBECONFIG=$HOME/.kube/dynamo-kubeconfig
-export TEST_NODE=aks-a100b-22138447-vmss000000   # any idle 8-GPU node
-export NS=kaim-dynamo-system
+export TEST_NODE=<your-8gpu-node>   # any idle 8-GPU node
+export NS=dynamo-power-test
 export TEST_FILE=components/src/dynamo/planner/tests/integration/test_multi_dgd_live.py
 export FIX_DIR=examples/multi-dgd-live-test    # this README's directory
 
 # B.1 — namespace + node label
 kubectl apply -f $FIX_DIR/00-namespace.yaml
-kubectl label node $TEST_NODE power-test/node=kaim --overwrite
+kubectl label node $TEST_NODE power-test/node=target --overwrite
 
 # B.2 — Power Agent in NVML mode (skip operator + DGDs)
 helm.exe upgrade --install power-agent deploy/helm/charts/power-agent \
@@ -381,9 +381,9 @@ python3.10 -m pytest $TEST_FILE -v --tb=short
 #  including the multi-pod conflict scenario.)
 ```
 
-## 2026-05-21 live-run record on dpp-dev-env AKS
+## 2026-05-21 live-run record on an 8-GPU A100 AKS node
 
-Executed end-to-end on `aks-a100b-22138447-vmss000000` (NVIDIA A100-SXM4-80GB
+Executed end-to-end on an 8-GPU A100 node (NVIDIA A100-SXM4-80GB
 ×8, driver 590.48.01, CUDA 13.1, Ubuntu 22.04). Captured for future
 reference and as PR-feedback context.
 
@@ -561,7 +561,7 @@ is just for cross-referencing.
     `"Power Limit"`, nested `children.{Current,Target}.value`) shape
     uniformly. Verification: feeding the helper synthetic payloads for
     both shapes returns the expected `(current, target)` watts; the next
-    live re-run on `aks-a100b-22138447-vmss000000` is expected to flip
+    live re-run on the test node is expected to flip
     `test_dcgm_per_gpu_cap_matches_topology` and
     `test_dcgm_target_config_registered` from SKIPPED to PASSED.
 
@@ -570,11 +570,11 @@ is just for cross-referencing.
 These are the patches we applied during the run that should be
 preserved (already saved):
 
-- `10-power-agent-values-nvml.yaml` — switched to `ttl.sh/dynamo-pa-kaim-4c3c606:24h`
+- `10-power-agent-values-nvml.yaml` — switched to `ttl.sh/dynamo-pa-4c3c606:24h`
   image, cluster-scoped RBAC (workaround for Finding #3), bumped
   memory limit (Finding #4). Inline comments explain each override.
 - `11-power-agent-values-dcgm.yaml` — switched to
-  `ttl.sh/dynamo-pa-kaim-dcgm45-v2:24h`, same RBAC + memory tweaks.
+  `ttl.sh/dynamo-pa-dcgm45-v2:24h`, same RBAC + memory tweaks.
 - `20-nvidia-dcgm-standalone-ds.yaml` — DCGM 4.5.1 image via ttl.sh
   (Findings #1 + #2 + #5 + #6), corrected `nv-hostengine` CLI flags
   (`-n -b 0.0.0.0 -p 5555` — the design-doc's `--bind-address`/`--port`
@@ -597,8 +597,8 @@ preserved (already saved):
 ## Recovery / teardown
 
 ```bash
-TEST_NODE=aks-a100b-22138447-vmss000000 \
-    NS=kaim-dynamo-system \
+TEST_NODE=<your-8gpu-node> \
+    NS=dynamo-power-test \
     bash 99-teardown.sh
 # Cleans up:
 #   - bystander pod, stub workers, 3 DGDs, profile CMs
@@ -612,13 +612,13 @@ TEST_NODE=aks-a100b-22138447-vmss000000 \
 ```
 
 After teardown, one piece of host-side state remains on the test node
-under `/var/lib/dynamo-power-agent-kaim-test/` (configured by
+under `/var/lib/dynamo-power-agent-test/` (configured by
 `10-power-agent-values-nvml.yaml:64`). This contains the agent's
 `managed_gpus.json` and is read by orphan-recovery on the next agent
 startup — its presence is **benign** (orphan recovery restores managed
 GPUs to default if no annotated pod claims them), but if you want a
 truly pristine node, SSH to the node and `rm -rf
-/var/lib/dynamo-power-agent-kaim-test/`. AKS does not give us SSH
+/var/lib/dynamo-power-agent-test/`. AKS does not give us SSH
 directly, so on AKS this requires either a privileged DaemonSet or
 `kubectl debug node/...` — we leave the cleanup to the user since it's
 non-functional.
@@ -638,4 +638,4 @@ non-functional.
   driver** — coexists fine with the GPU Operator's `nvidia-dcgm-exporter`
   (verified empirically; both use the embedded host engine pattern but
   the standalone DS adds its own TCP listener on 5555 in the
-  `kaim-dynamo-system` namespace, no clash).
+  `dynamo-power-test` namespace, no clash).

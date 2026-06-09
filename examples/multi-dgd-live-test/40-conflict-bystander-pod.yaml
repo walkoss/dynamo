@@ -15,7 +15,7 @@
 # this manifest deliberately avoids:
 #
 #   1. `NVIDIA_VISIBLE_DEVICES=<uuid>` / `<index>` — AKS in CDI device
-#      mode (dpp-dev-env default) rejects both with
+#      mode (the cluster default) rejects both with
 #      `unresolvable CDI devices management.nvidia.com/gpu=*` and
 #      refuses to admit the pod. See `50-stub-workers.yaml` lines
 #      11-16 for the same constraint described from the worker side.
@@ -46,7 +46,7 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: power-conflict-bystander
-  namespace: kaim-dynamo-system
+  namespace: dynamo-power-test
   labels:
     purpose: power-aware-multi-dgd-test
     role: conflict-bystander
@@ -57,7 +57,7 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector:
-    power-test/node: kaim
+    power-test/node: target
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists

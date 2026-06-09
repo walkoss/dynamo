@@ -4,11 +4,11 @@
 # Power Agent helm values override — DCGM actuator pass.
 # Prerequisite: 20-nvidia-dcgm-standalone-ds.yaml has been applied AND the
 # DS has rolled out on the test node. Verify:
-#   kubectl exec -n kaim-dynamo-system <hostengine-pod> -- nv-hostengine --version
+#   kubectl exec -n dynamo-power-test <hostengine-pod> -- nv-hostengine --version
 #
 # Apply with:
 #   helm upgrade power-agent deploy/helm/charts/power-agent \
-#       --namespace kaim-dynamo-system -f 11-power-agent-values-dcgm.yaml
+#       --namespace dynamo-power-test -f 11-power-agent-values-dcgm.yaml
 
 image:
   # IMAGE NOTE — ephemeral ttl.sh tag (24h TTL). If `helm install` fails
@@ -23,7 +23,7 @@ image:
   # bindings/python3 (Finding #2) and drops in a logger.py shim
   # (Finding #6). See 20-nvidia-dcgm-standalone-ds.yaml for the
   # matching hostengine image.
-  repository: ttl.sh/dynamo-pa-kaim-dcgm45-v2
+  repository: ttl.sh/dynamo-pa-dcgm45-v2
   tag: "24h"
   pullPolicy: IfNotPresent
 
@@ -37,7 +37,7 @@ agent:
     # The standalone DS exposes a headless Service at this DNS name
     # (see 20-nvidia-dcgm-standalone-ds.yaml). Default chart value points at
     # gpu-operator's DCGM hostengine which is not deployed on this cluster.
-    host: nvidia-dcgm-standalone.kaim-dynamo-system.svc.cluster.local
+    host: nvidia-dcgm-standalone.dynamo-power-test.svc.cluster.local
     port: 5555
     # Register the cap as DCGM's target configuration so the hostengine
     # re-applies it after GPU reset / driver reinit. Costs one extra RPC
@@ -52,7 +52,7 @@ env:
 
 nodeSelector:
   nvidia.com/gpu.present: "true"
-  power-test/node: "kaim"
+  power-test/node: "target"
 
 tolerations:
   - key: nvidia.com/gpu
@@ -72,7 +72,7 @@ daemonset:
       maxUnavailable: 1
 
 state:
-  hostPath: /var/lib/dynamo-power-agent-kaim-test
+  hostPath: /var/lib/dynamo-power-agent-test
 
 # See 10-power-agent-values-nvml.yaml — the chart's 128 MiB default is too
 # tight for live testing with repeated `kubectl exec -- python` probes.

@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Namespace already exists on the cluster (kaim-dynamo-system, 12d old).
-# This file is here for completeness — applying it is a no-op if the ns
+# Test namespace for this example. Applying it is a no-op if the namespace
 # already exists.
 #
 # The pull-secret `nvcr-imagepullsecret` (Opaque/dockerconfigjson) is
 # expected to be present in this namespace and to cover nvcr.io. Verify:
-#   kubectl get secret nvcr-imagepullsecret -n kaim-dynamo-system
+#   kubectl get secret nvcr-imagepullsecret -n dynamo-power-test
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: kaim-dynamo-system
+  name: dynamo-power-test
   labels:
     purpose: power-aware-planner-test
