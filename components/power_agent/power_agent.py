@@ -864,6 +864,16 @@ class PowerAgent:
         from the wrong physical GPU on any node where DCGM and NVML
         disagree on enumeration order — see actuator.py
         `_ensure_identity_map` and design doc §6.3 note 5.
+
+        Caps are persistent by design: when a GPU has no K8s workload this
+        cycle we deliberately DO NOT restore default TDP here. A managed
+        worker may exit briefly (OOM, reschedule) and return to the same
+        GPU; restoring during that gap would violate the planner's power
+        budget, and the planner owns cap lifecycle via annotation
+        removal/update. The cap is only restored to default by
+        ``_handle_sigterm`` (agent shutdown) and
+        ``_restore_orphaned_gpus_on_startup`` (previously-managed +
+        now-idle GPUs at agent start). Per PR #9682 @sttts review.
         """
         pids = self._actuator.list_running_pids(gpu_idx)
         if not pids:
