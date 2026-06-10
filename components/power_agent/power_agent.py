@@ -757,26 +757,40 @@ class PowerAgent:
             k8s_config.load_kube_config()
         self._core_v1 = k8s_client.CoreV1Api()
 
-    def _list_pods_on_node(self) -> list:
+    def _list_pods_on_node(self) -> Optional[list]:
         """List all pods scheduled on this node.
 
-        Propagates Kubernetes API errors. Per PR9790 Codex adversarial
-        review (finding #3): the pre-fix `except Exception: return []`
-        made transient apiserver failures indistinguishable from an
-        empty node, silently dropping enforcement. `reconcile_once` now
-        catches and skips the cycle (preserving last-applied caps).
+        Returns the pod list on success (an empty list is a *valid* success
+        result, meaning this node genuinely hosts no pods), or ``None`` to
+        signal that the listing FAILED (API error).
+
+        The ``None`` sentinel is deliberate and load-bearing: callers MUST
+        distinguish "the API call failed" from "this node has zero pods".
+        Returning ``[]`` for both would let a transient apiserver error look
+        identical to an empty node, silently re-deriving every GPU's cap from
+        a zero-pod view. ``reconcile_once`` keys its fail-safe (skip the cycle,
+        freeze each GPU at its last-known-good cap) off this ``None`` — so do
+        NOT collapse the failure path back to ``[]``.
         """
-        field_selector = f"spec.nodeName={self.node_name}" if self.node_name else None
-        if self.k8s_namespace:
-            result = self._core_v1.list_namespaced_pod(
-                namespace=self.k8s_namespace,
-                field_selector=field_selector,
+        try:
+            field_selector = (
+                f"spec.nodeName={self.node_name}" if self.node_name else None
             )
-        else:
-            result = self._core_v1.list_pod_for_all_namespaces(
-                field_selector=field_selector,
-            )
-        return result.items
+            if self.k8s_namespace:
+                result = self._core_v1.list_namespaced_pod(
+                    namespace=self.k8s_namespace,
+                    field_selector=field_selector,
+                )
+            else:
+                result = self._core_v1.list_pod_for_all_namespaces(
+                    field_selector=field_selector,
+                )
+            return result.items
+        except Exception as e:
+            # Explicit failure result — see the contract in the docstring.
+            # Returning None (not []) is what keeps the reconcile fail-safe.
+            logger.warning("Failed to list pods on node: %s", e)
+            return None
 
     def _build_uid_to_annotation(self, pods: list) -> dict[str, Optional[str]]:
         """Map pod UID → power-limit annotation value (or None if absent/malformed)."""
@@ -792,21 +806,29 @@ class PowerAgent:
 
         On Kubernetes API failure during the pod list we skip the cycle
         rather than treating the apiserver outage as "no pods on this
-        node" (which would silently drop enforcement for the duration
-        of the outage). Previously-applied caps remain live; a NEW pod
-        arriving during the outage runs at whatever cap was last set
-        on its GPU. Operators should alert on
+        node" (which would silently drop enforcement for the duration of
+        the outage). Previously-applied caps remain live; a NEW pod
+        arriving during the outage runs at whatever cap was last set on
+        its GPU. Operators should alert on
         `k8s_list_failures_total > 0 over 5m`. Per PR9790 Codex
         adversarial review (finding #3).
         """
-        try:
-            pods = self._list_pods_on_node()
-        except Exception as e:
+        pods = self._list_pods_on_node()
+        if pods is None:
+            # Fail-safe: the pod listing failed (API error), so we have no
+            # trustworthy view of which pods own which GPUs this cycle. We
+            # deliberately SKIP the reconcile rather than proceed with an
+            # empty view — skipping freezes each GPU at its last-known-good
+            # cap until the next successful cycle, which is strictly safer
+            # than un-capping or re-deriving caps from a zero-pod snapshot.
+            # The cap state lives on the GPU (NVML) and the agent's managed
+            # set, so a skipped cycle loses nothing.
             self.metrics.k8s_list_failures_total.inc()
             logger.error(
-                "Kubernetes pod-list failed (%s); skipping reconcile cycle. "
-                "Previously-applied caps remain in effect.",
-                e,
+                "Kubernetes pod-list failed; skipping reconcile cycle to "
+                "preserve last-known-good caps. Previously-applied caps "
+                "remain in effect; alert on k8s_list_failures_total > 0 "
+                "over 5m."
             )
             return
         uid_to_annotation = self._build_uid_to_annotation(pods)
