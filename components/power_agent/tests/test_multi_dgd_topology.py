@@ -46,7 +46,6 @@ from power_agent import PowerAgent
 
 from tests.test_multi_pod_policy import _FakeMetrics
 
-
 # ---------------------------------------------------------------------------
 # Canonical topology (see docs/design-docs/multi-tenant-test.md §2)
 # ---------------------------------------------------------------------------
@@ -77,14 +76,20 @@ PID_TO_UID: dict[int, str] = {
     # GPU 1  — vLLM decode (1 GPU, 1 PID)
     1200: UID_V_DECODE,
     # GPU 2,3 — TRTLLM prefill (tp=2, 2 PIDs per GPU)
-    2200: UID_T_PREFILL, 2201: UID_T_PREFILL,
-    2300: UID_T_PREFILL, 2301: UID_T_PREFILL,
+    2200: UID_T_PREFILL,
+    2201: UID_T_PREFILL,
+    2300: UID_T_PREFILL,
+    2301: UID_T_PREFILL,
     # GPU 4,5 — TRTLLM decode (tp=2, 2 PIDs per GPU)
-    2400: UID_T_DECODE, 2401: UID_T_DECODE,
-    2500: UID_T_DECODE, 2501: UID_T_DECODE,
+    2400: UID_T_DECODE,
+    2401: UID_T_DECODE,
+    2500: UID_T_DECODE,
+    2501: UID_T_DECODE,
     # GPU 6,7 — SGLang aggregated (tp=2, 2 PIDs per GPU)
-    5600: UID_S_AGG, 5601: UID_S_AGG,
-    5700: UID_S_AGG, 5701: UID_S_AGG,
+    5600: UID_S_AGG,
+    5601: UID_S_AGG,
+    5700: UID_S_AGG,
+    5701: UID_S_AGG,
 }
 
 # `actuator.list_running_pids(gpu_idx)` → list of PIDs on that physical GPU.
@@ -304,7 +309,8 @@ class TestMultiFrameworkReconcileMisconfigBlastRadius(unittest.TestCase):
         # GPU 0 went to safe-default (450 W and 480 W are a genuine
         # conflict per _resolve_cap_for_gpu).
         gpu0_cap_call = [
-            call for call in self.agent._actuator.apply_cap.call_args_list
+            call
+            for call in self.agent._actuator.apply_cap.call_args_list
             if call.args[0] == 0
         ]
         self.assertEqual(len(gpu0_cap_call), 1)
@@ -316,7 +322,8 @@ class TestMultiFrameworkReconcileMisconfigBlastRadius(unittest.TestCase):
             if gpu_idx == 0:
                 continue  # safe-default case above
             calls = [
-                call for call in self.agent._actuator.apply_cap.call_args_list
+                call
+                for call in self.agent._actuator.apply_cap.call_args_list
                 if call.args[0] == gpu_idx
             ]
             self.assertEqual(len(calls), 1, f"GPU {gpu_idx} cap miscount")
