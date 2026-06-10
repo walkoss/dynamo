@@ -6,9 +6,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # In-cluster dev-iteration harness. Renders a single Pod that mounts
-# power_agent.py AND actuator.py from an externally-created ConfigMap,
-# pinned to one GPU node (dev.nodeName) and one namespace
-# (Release.Namespace).
+# power_agent.py, actuator.py, and managed_state.py from an
+# externally-created ConfigMap, pinned to one GPU node (dev.nodeName)
+# and one namespace (Release.Namespace).
 #
 # PREREQUISITE (verified by validateMutex; failure mode is a Pending Pod
 # with `MountVolume.SetUp failed`):

@@ -107,25 +107,26 @@ A passing chart install is guaranteed to render either
 {{- define "power-agent.validateImageTag" -}}
 {{- $tag := .Values.image.tag | toString -}}
 {{- $digest := .Values.image.digest | toString -}}
+{{- $appTag := printf "v%s" .Chart.AppVersion -}}
 {{- if and (not $tag) (not $digest) -}}
-{{- fail "image.tag or image.digest is required (pin to a release tag like v1.1.0 or a digest like sha256:abc...; :latest is not supported)" -}}
+{{- fail (printf "image.tag or image.digest is required (pin to a release tag like %s or a digest like sha256:abc...; :latest is not supported)" $appTag) -}}
 {{- end -}}
 {{- if and $tag $digest -}}
 {{- fail (printf "image.tag and image.digest are mutually exclusive (got tag=%q digest=%q). Pick one — digest gives strict content-addressed reproducibility, tag is human-readable." $tag $digest) -}}
 {{- end -}}
 {{- if $tag -}}
 {{/* PR9790 follow-up: `ne $tag (trim $tag)` only caught leading/
-    trailing whitespace. Internal whitespace (e.g. `image.tag="v1 .1.0"`
+    trailing whitespace. Internal whitespace (e.g. `image.tag="v1 .2.0"`
     from a copy/paste error or a YAML-quoted typo) passed through and
-    rendered an invalid OCI image reference like `repo:v1 .1.0`,
+    rendered an invalid OCI image reference like `repo:v1 .2.0`,
     deferring failure from template time to kubelet pull time.
     `regexMatch "\\s" $tag` catches any whitespace anywhere. */}}
 {{- if regexMatch "\\s" $tag -}}
-{{- fail (printf "image.tag=%q contains whitespace; OCI tags do not permit whitespace and rendering it verbatim would produce an invalid image reference (e.g. `repo: v1.1.0 ` or `repo:v1 .1.0`). Fix the --set / values.yaml input. Hint: --set-string preserves whitespace exactly as quoted." $tag) -}}
+{{- fail (printf "image.tag=%q contains whitespace; OCI tags do not permit whitespace and rendering it verbatim would produce an invalid image reference (e.g. `repo: %s ` or `repo:v1 .2.0`). Fix the --set / values.yaml input. Hint: --set-string preserves whitespace exactly as quoted." $tag $appTag) -}}
 {{- end -}}
 {{- $tagLower := $tag | lower -}}
 {{- if eq $tagLower "latest" -}}
-{{- fail (printf "image.tag=%q is not supported. Pin a release tag (e.g. v1.1.0) or set image.digest=sha256:<hex>. The :latest tag was deliberately rejected on PR #9682 review to keep deployments reproducible." $tag) -}}
+{{- fail (printf "image.tag=%q is not supported. Pin a release tag (e.g. %s) or set image.digest=sha256:<hex>. The :latest tag was deliberately rejected on PR #9682 review to keep deployments reproducible." $tag $appTag) -}}
 {{- end -}}
 {{- if hasPrefix "sha256:" $tagLower -}}
 {{- fail (printf "image.tag=%q looks like a digest (starts with sha256:) — digests must go on image.digest, NOT image.tag. Rendering %q:%q would produce an invalid OCI image reference (`repo:sha256:...` parses as repo + tag \"sha256\" with a stray suffix). Use `--set image.tag=\"\" --set image.digest=%s` instead. PR #9682 added image.digest as a separate field for exactly this reason." $tag .Values.image.repository $tag $tag) -}}

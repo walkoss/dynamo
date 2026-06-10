@@ -137,7 +137,7 @@ helm install dynamo-platform ./deploy/helm/charts/platform \
 # 2. Install the Power Agent (NEW chart from this plan).
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace dynamo-system \
-  --set image.tag=v1.1.0 \
+  --set image.tag=v1.2.0 \
   --set agent.safeDefaultWatts=500   # per-SKU; H200=500, H100=490, A100=280
   # Add `--set agent.actuator=dcgm` (and optionally agent.dcgm.{host,port,enforce})
   # on clusters where the GPU Operator runs with dcgm.enabled=true; otherwise
@@ -591,7 +591,7 @@ dev:
   # override repository + tag to the production power-agent image,
   # which vendors the required pydcgm bindings and libdcgm.so:
   #   --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent
-  #   --set dev.image.tag=v1.1.0
+  #   --set dev.image.tag=v1.2.0
   # Script-iteration via the ConfigMap mount still works against the
   # power-agent image (the /scripts mount overrides /app at runtime).
   image:
@@ -625,7 +625,7 @@ Mapping each CodeRabbit-flagged issue to the chart construct that resolves it:
 | CodeRabbit comment (raw YAML) | Chart construct | Resolution |
 |------------------------------|-----------------|------------|
 | `daemonset.yaml:35` namespace hardcoded to `default` | `metadata: { namespace: {{ .Release.Namespace }} }` in `templates/daemonset.yaml` and `templates/dev-pod.yaml` | Namespace flows from `--namespace` flag at install time; no chart edit needed to deploy in a different namespace |
-| `daemonset.yaml:58` `:latest` mutable image tag | `tag: ""` + `digest: ""` in `values.yaml` (no default on either) + `power-agent.validateImageTag` helper in `_helpers.tpl` (rejects unset / `latest` / digest-on-tag / non-`sha256:<64hex>` digest / whitespace) + `power-agent.imageRef` helper that renders the canonical `{repo}:{tag}` or `{repo}@{digest}` reference. PR #9682 follow-ups (chart v1.2.0): `image.digest` was added as a separate field because the original `--set image.tag=sha256:...` form rendered the invalid reference `repo:sha256:...` (the canonical OCI digest form is `repo@sha256:...`); validator was tightened to enforce 64 hex chars exactly (SHA-256 is 32 bytes × 2 nybbles) and to reject leading/trailing whitespace. | Chart refuses to install without an explicit pin; caller pins via `--set image.tag=v1.1.0` (current `appVersion`) **OR** `--set image.digest=sha256:<64 hex>` (mutually exclusive). |
+| `daemonset.yaml:58` `:latest` mutable image tag | `tag: ""` + `digest: ""` in `values.yaml` (no default on either) + `power-agent.validateImageTag` helper in `_helpers.tpl` (rejects unset / `latest` / digest-on-tag / non-`sha256:<64hex>` digest / whitespace) + `power-agent.imageRef` helper that renders the canonical `{repo}:{tag}` or `{repo}@{digest}` reference. PR #9682 follow-ups (chart v1.2.0): `image.digest` was added as a separate field because the original `--set image.tag=sha256:...` form rendered the invalid reference `repo:sha256:...` (the canonical OCI digest form is `repo@sha256:...`); validator was tightened to enforce 64 hex chars exactly (SHA-256 is 32 bytes × 2 nybbles) and to reject leading/trailing whitespace. | Chart refuses to install without an explicit pin; caller pins via `--set image.tag=v1.2.0` (current `appVersion`) **OR** `--set image.digest=sha256:<64 hex>` (mutually exclusive). |
 | `rbac.yaml:50` `${POWER_AGENT_NAMESPACE}` envsubst placeholder | `namespace: {{ .Release.Namespace }}` in `templates/rolebinding.yaml` | No envsubst step; Helm resolves natively |
 
 The chart also resolves an issue CodeRabbit *didn't* file but is worth
@@ -947,7 +947,7 @@ addresses a specific point in the v1.2 review-feedback cycle:
    > ```bash
    > helm install power-agent ./deploy/helm/charts/power-agent \
    >   --namespace $NAMESPACE \
-   >   --set image.tag=v1.1.0 \
+   >   --set image.tag=v1.2.0 \
    >   --set daemonset.enabled=false \
    >   --set dev.enabled=true \
    >   --set dev.nodeName=<gpu-node-name>
@@ -966,7 +966,7 @@ addresses a specific point in the v1.2 review-feedback cycle:
    >
    > ```bash
    >   --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent \
-   >   --set dev.image.tag=v1.1.0
+   >   --set dev.image.tag=v1.2.0
    > ```
    >
    > Script iteration via the ConfigMap mount still works against the
@@ -1001,31 +1001,31 @@ Before the commit gets pushed to `pr1a/power-agent` (or to
 1. **`helm lint deploy/helm/charts/power-agent`** — zero errors.
 2. **`helm template`** with four representative value overlays
    (the fourth was added in v1.1.0 for the DCGM actuator path). Every
-   positive command MUST include `--set image.tag=v1.1.0` — without
+   positive command MUST include `--set image.tag=v1.2.0` — without
    it the chart fails fast via `validateImageTag` before reaching the
    overlay under test, which is the intended behaviour but it means
-   a "default install" command is `--set image.tag=v1.1.0` (the
+   a "default install" command is `--set image.tag=v1.2.0` (the
    negative case of an absent tag is exercised separately in gate 3):
 
    ```bash
    # 2a. default (production DS, cluster RBAC, NVML actuator)
    helm template power-agent ./deploy/helm/charts/power-agent \
-     --namespace dynamo-system --set image.tag=v1.1.0
+     --namespace dynamo-system --set image.tag=v1.2.0
 
    # 2b. namespace-scoped RBAC
    helm template power-agent ./deploy/helm/charts/power-agent \
-     --namespace dynamo-system --set image.tag=v1.1.0 \
+     --namespace dynamo-system --set image.tag=v1.2.0 \
      --set rbac.namespaceRestricted=true
 
    # 2c. dev mode (Pod, not DaemonSet; pinned to one GPU node)
    helm template power-agent ./deploy/helm/charts/power-agent \
-     --namespace dynamo-system --set image.tag=v1.1.0 \
+     --namespace dynamo-system --set image.tag=v1.2.0 \
      --set daemonset.enabled=false \
      --set dev.enabled=true --set dev.nodeName=<gpu-node>
 
    # 2d. DCGM actuator (re-run with --set agent.dcgm.enforce=true too)
    helm template power-agent ./deploy/helm/charts/power-agent \
-     --namespace dynamo-system --set image.tag=v1.1.0 \
+     --namespace dynamo-system --set image.tag=v1.2.0 \
      --set agent.actuator=dcgm
    ```
 
@@ -1036,10 +1036,10 @@ Before the commit gets pushed to `pr1a/power-agent` (or to
    values) — must fail fast at template time with the message from
    §4.4's `validateImageTag` helper. This is the only gate that
    intentionally omits `--set image.tag=...`.
-4. **`helm template`** with `--set image.tag=v1.1.0 --set daemonset.enabled=true --set dev.enabled=true` — must fail fast at template time with the `validateMutex` message.
-5. **`helm template`** with `--set image.tag=v1.1.0 --set agent.actuator=invalid` — must fail fast at template time with the `validateActuator` message (v1.1.0+).
-6. **`helm template`** with `--set image.tag=v1.1.0 --set agent.actuator=dcgm --set agent.dcgm.enforce=treu` — must fail fast with the `validateEnforce` message (v1.1.0+; mirrors `_parse_bool_strict`).
-7. **`helm unittest deploy/helm/charts/power-agent`** — required as of v1.1.0. The `tests/validate_actuator_test.yaml`, `tests/validate_enforce_test.yaml`, and (v1.2.0+) `tests/validate_image_tag_test.yaml` files in the chart exercise every positive/negative case for the template-time validators (see §4.4 closing paragraph). Snapshot of expected output: `24 passed, 0 failed` for the v1.1.0 chart, **`46 passed, 0 failed` for the v1.2.0 chart** (added 22 cases across the new image.tag/digest validator: tag/digest mutex, latest rejection, whitespace rejection, sha256-on-tag rejection, exactly-64-hex digest enforcement, repo@digest canonical-form rendering).
+4. **`helm template`** with `--set image.tag=v1.2.0 --set daemonset.enabled=true --set dev.enabled=true` — must fail fast at template time with the `validateMutex` message.
+5. **`helm template`** with `--set image.tag=v1.2.0 --set agent.actuator=invalid` — must fail fast at template time with the `validateActuator` message (v1.1.0+).
+6. **`helm template`** with `--set image.tag=v1.2.0 --set agent.actuator=dcgm --set agent.dcgm.enforce=treu` — must fail fast with the `validateEnforce` message (v1.1.0+; mirrors `_parse_bool_strict`).
+7. **`helm unittest deploy/helm/charts/power-agent`** — required as of v1.1.0. The `tests/validate_actuator_test.yaml`, `tests/validate_enforce_test.yaml`, and (v1.2.0+) `tests/validate_image_tag_test.yaml` files in the chart exercise every positive/negative case for the template-time validators (see §4.4 closing paragraph). Snapshot of expected output: `24 passed` for the v1.1.0 chart, `46 passed` for the v1.2.0 chart, and **`49 passed, 0 failed` for the current v1.3.0 chart** (v1.2.0 added 22 cases across the image.tag/digest validator — tag/digest mutex, latest rejection, whitespace rejection, sha256-on-tag rejection, exactly-64-hex digest enforcement, repo@digest canonical-form rendering — and v1.3.0 added 3 more; verified via `helm unittest deploy/helm/charts/power-agent`).
 8. **Pre-commit hooks pass on the chart files** — the same 8 hooks the v3.3 §7 checklist enforces (isort/black/flake8/codespell/end-of-file-fixer/trailing-whitespace/check-yaml/ruff). `check-yaml` is the relevant one for chart files; the rest don't touch YAML.
 9. **No CI regression** — planner-group jobs trigger and pass (the chart sits inside the planner-group path filter; same job set that already covers `deploy/power_agent/**`).
 
@@ -1061,7 +1061,7 @@ encode chart contracts the dev-mode iteration loop depends on (e.g. the
 | 3 | Image-tag requirement breaks demo flows that previously used `:latest` | Low (no production users yet — PR9682 is open) | README documents the requirement prominently; demo recipe in `examples/deployments/powerplanner/` will reference a pinned tag |
 | 4 | Reviewers ask "why is this in PR9682 and not a separate PR?" | Medium | Pre-empted by §3.2 rationale + §1.2 CodeRabbit linkage in the PR description |
 | 5 | `helm-unittest` absence flagged in review (other charts use it) | ✅ **Closed in v1.1.0 (PR9790)** — `tests/validate_actuator_test.yaml` + `tests/validate_enforce_test.yaml` ship with the chart; `helm unittest deploy/helm/charts/power-agent` is now a required §5.4 validation gate. | n/a — historical row kept for the audit trail. |
-| 6 | Chart `appVersion` drift from `power_agent.py` over time | Medium (long-term) | Current state: chart `version` and `appVersion` both pin to `"1.1.0"` (bumped in PR9790 alongside the DCGM actuator wiring; v1.0.0 was the PR9682 NVML-only baseline). Document in the chart README that subsequent agent revs bump both in lock-step. If the appVersion gets out of sync in a future PR, that's a release-process bug, not a chart-design bug. The chart-README install examples (and §1.4.2 / §5.3.1 here) MUST be kept current with `appVersion` because earlier images reject newer CLI flags (e.g. v1.0.0 image + v1.1.0 chart → argparse rejects `--actuator`). |
+| 6 | Chart `appVersion` drift from `power_agent.py` over time | Medium (long-term) | Current state: chart `version` is `"1.3.0"` and `appVersion` is `"1.2.0"` (v1.0.0 was the PR9682 NVML-only baseline; the DCGM actuator, `image.digest` pinning, and the managed-state module split advanced both since). Document in the chart README that subsequent agent revs bump both in lock-step. If the appVersion gets out of sync in a future PR, that's a release-process bug, not a chart-design bug. The chart-README install examples (and §1.4.2 / §5.3.1 here) MUST be kept current with `appVersion` because earlier images reject newer CLI flags (e.g. v1.0.0 image + v1.1.0 chart → argparse rejects `--actuator`). |
 | 7 | `dev.scriptConfigMap` is named externally; users may forget to create it | Medium (only affects dev mode) | **v1.2 update:** the ConfigMap-creation recipe is promoted from a post-install NOTES.txt hint to a **prerequisite step ordered before `helm install`** in the chart README (see §5.3.1 step 3). NOTES.txt repeats the recipe post-install for safety. Chart `helm install` itself does not error if the CM is missing — failure mode is a Pending Pod with a clear `MountVolume.SetUp failed for volume "script"` event, which is debuggable. Auto-creation via Helm pre-install hook was considered and rejected (extra RBAC + Job machinery for a dev-only feature). |
 | 8 | Cascade impact: PR9683 base auto-updates when PR9682's tip moves | Low (PR9683 is `pr1b/planner-infra` based on `pr1a/power-agent`; new commit on `pr1a` is a non-conflicting addition to a disjoint file tree) | Confirmed by inspection: PR9683's diff touches `deploy/helm/charts/platform/...`, `deploy/planner-pod-rbac-dev.yaml`, and planner Python files only. None of these collide with `deploy/helm/charts/power-agent/`. PR9683 rebases trivially. |
 | 9 | Dead-knob risk: a `values.yaml` key whose name suggests it does something but is never wired to a template or CLI flag (silently no-ops; user thinks they configured it). | Medium (one such case found in v1.1: `agent.reconcileIntervalSeconds`, which had no `power_agent.py` CLI wiring — dropped in v1.2 per the v1.2 revision note) | Apply the **dead-knob audit principle** when authoring: every key in `values.yaml` must trace to either (a) a `{{ .Values.xxx }}` reference in a `templates/*.yaml`, or (b) a CLI flag in `power_agent.py:main()` whose `args.xxx` is consumed by `PowerAgent.__init__`. Audit during the §8 authoring checklist (new sub-bullet). If a desired knob has no current wiring, drop it from `values.yaml` and open a separate Python PR to add the flag first. |
@@ -1118,9 +1118,10 @@ users want parametric DGD generation, that belongs in a separate
 
 ### 7.4 Power-agent appVersion bumping policy
 
-Current state: chart `version` and `appVersion` both pin to `"1.1.0"`
-(bumped together in PR9790 — minor bump per SemVer because the DCGM
-actuator is new opt-in functionality with byte-equivalent NVML default
+Current state: chart `version` is `"1.3.0"` and `appVersion` is `"1.2.0"`
+(both advanced past the v1.0.0 PR9682 NVML-only baseline as the DCGM
+actuator, `image.digest` pinning, and the managed-state module split
+landed; bumped together per SemVer with byte-equivalent NVML default
 behaviour). The original v1.0.0 baseline landed in PR9682. When
 `power_agent.py` next gains a substantive behaviour change, both bump
 together. Codifying this as a chart-release policy (e.g., a pre-commit
@@ -1184,7 +1185,7 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
   ```bash
   helm install power-agent ./deploy/helm/charts/power-agent \
     --namespace <ns> \
-    --set image.tag=v1.1.0 \
+    --set image.tag=v1.2.0 \
     --set agent.safeDefaultWatts=500
   # release name 'power-agent' + chart name 'power-agent' → fullname helper
   # collapses to just 'power-agent' (the `contains $name .Release.Name` branch
