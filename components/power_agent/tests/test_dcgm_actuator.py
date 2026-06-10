@@ -1366,6 +1366,110 @@ class TestRestoreDefault(unittest.TestCase):
         self.assertEqual(cfg.mPowerLimit.val, 400)
         modules["dcgm_agent"].dcgmEntityGetLatestValues.assert_not_called()
 
+    def test_restore_default_relocates_managed_uuid_after_reenumeration(self):
+        """A hostengine restart can change gpu_idx -> gpu_id ordering.
+
+        If GPU index 0 was capped while it resolved to UUID A, but later
+        resolves to UUID B, restore_default(0) must restore UUID A at its
+        current index rather than writing default TGP to UUID B.
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        actuator._discovered_gpu_ids = [20, 10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: {
+            10: _make_gpu_attrs("GPU-A", default_w=410),
+            20: _make_gpu_attrs("GPU-B", default_w=620),
+        }[gid]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                actuator.restore_default(0)
+
+        cfg = modules["pydcgm"].DcgmGroup.return_value.config.Set.call_args.args[0]
+        self.assertEqual(cfg.mPowerLimit.val, 410)
+        group = modules["pydcgm"].DcgmGroup.return_value
+        group.AddGpu.assert_called_with(10)
+        self.assertIn("restoring capped UUID GPU-A", "\n".join(cm.output))
+        self.assertEqual(actuator.managed_uuid_for_idx(0), "GPU-A")
+
+    def test_restore_default_skips_when_managed_uuid_left_node(self):
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        actuator._discovered_gpu_ids = [20]
+        discovery.GetGpuAttributes.side_effect = lambda gid: {
+            20: _make_gpu_attrs("GPU-B", default_w=620),
+        }[gid]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                actuator.restore_default(0)
+
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        self.assertIn("GPU-A is no longer visible", "\n".join(cm.output))
+
+    def test_restore_default_best_effort_when_identity_unreadable(self):
+        """A transient DCGM read failure at restore must NOT be treated as
+        'GPU gone'. We fall back to the original index so `_apply_cap_inner`'s
+        own reconnect-and-retry can still attempt the restore — abandoning a
+        capped GPU on an unverifiable read is worse than a best-effort write.
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        actuator._discovered_gpu_ids = [10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: {
+            10: _make_gpu_attrs("GPU-A", default_w=410),
+        }[gid]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            with patch.object(
+                actuator, "get_uuid", side_effect=RuntimeError("hostengine blip")
+            ):
+                with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                    result = actuator.restore_default(0)
+
+        self.assertTrue(result)
+        cfg = modules["pydcgm"].DcgmGroup.return_value.config.Set.call_args.args[0]
+        self.assertEqual(cfg.mPowerLimit.val, 410)
+        self.assertIn("best-effort restore at the", "\n".join(cm.output))
+
+    def test_restore_default_skips_when_scan_incomplete_after_proven_mismatch(self):
+        """After a PROVEN index mismatch, an inconclusive relocation scan must
+        NOT fall back to the original index. That index now hosts a different
+        physical GPU, so writing default TGP there would clobber an unrelated
+        GPU and — because the SIGTERM caller prunes the capped UUID after a
+        "successful" restore — drop the real capped GPU from managed_gpus.json,
+        leaking its cap. We skip without writing instead; cold-start orphan
+        recovery retries on the next boot.
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        actuator._discovered_gpu_ids = [20, 30]
+
+        def _attrs(gid):
+            if gid == 20:
+                return _make_gpu_attrs("GPU-B", default_w=620)
+            raise RuntimeError("hostengine blip on gpu_id 30")
+
+        discovery.GetGpuAttributes.side_effect = _attrs
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                result = actuator.restore_default(0)
+
+        self.assertFalse(result)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        self.assertIn("relocation scan incomplete", "\n".join(cm.output))
+
     def test_restore_default_raises_on_write_failure(self):
         """restore_default propagates DCGM write failure to the caller.
 

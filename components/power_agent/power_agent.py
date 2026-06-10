@@ -24,6 +24,7 @@ import signal
 import threading
 from typing import Callable, Optional
 
+import managed_state
 from actuator import Actuator, DcgmActuator, NvmlActuator
 
 # Kubernetes and NVML — imported lazily with clear error messages
@@ -60,7 +61,9 @@ logger = logging.getLogger("power_agent")
 
 POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
 RECONCILE_INTERVAL_S = 15
-_MANAGED_STATE_PATH = "/var/lib/dynamo-power-agent/managed_gpus.json"
+# Sourced from `managed_state` so every launch path (and the actuator's
+# separate `import power_agent` module copy) agrees on one location.
+_MANAGED_STATE_PATH = managed_state.MANAGED_STATE_PATH
 
 # ---------------------------------------------------------------------------
 # cgroup pod-UID extraction
@@ -104,7 +107,14 @@ def _extract_pod_uid_from_cgroup(pid: int) -> Optional[str]:
 # Persistent managed-GPU state (UUID-gated orphan recovery)
 # ---------------------------------------------------------------------------
 
-_previously_managed: set[str] = set()
+# Alias to the single source of truth in `managed_state`. The daemon is
+# launched as `python power_agent.py` (so this file is `__main__`) while
+# `actuator.py` reaches the same state via `import power_agent` — two distinct
+# module objects. Hosting the set in `managed_state` (which both import by
+# canonical name) guarantees one copy. NEVER rebind this name; always mutate
+# in place (`.add`/`.discard`/`.clear`/`.update`), or the alias splits and the
+# dual-copy bug returns. See managed_state.py for the full rationale.
+_previously_managed: set[str] = managed_state.previously_managed
 
 
 def _load_previously_managed_gpus() -> set[str]:
@@ -346,7 +356,9 @@ def _clamp_to_constraints(
     return requested_w
 
 
-_managed_gpu_indices: set[int] = set()
+# Alias to `managed_state` (see `_previously_managed` above for why). Mutate in
+# place only; the SIGTERM handler and the actuator must see the same set.
+_managed_gpu_indices: set[int] = managed_state.managed_gpu_indices
 
 
 def _apply_cap(
@@ -422,14 +434,27 @@ def _handle_sigterm(signum, frame):
         restored_uuid: Optional[str] = None
         try:
             if actuator is not None:
-                actuator.restore_default(gpu_idx)
+                restore_result = actuator.restore_default(gpu_idx)
+                if restore_result is False:
+                    logger.warning(
+                        "Skipped default TGP restore for GPU %d via %s actuator "
+                        "(managed GPU no longer visible)",
+                        gpu_idx,
+                        actuator.name,
+                    )
+                    continue
                 logger.info(
                     "Restored GPU %d to default TGP via %s actuator",
                     gpu_idx,
                     actuator.name,
                 )
                 try:
-                    restored_uuid = actuator.get_uuid(gpu_idx)
+                    if hasattr(type(actuator), "managed_uuid_for_idx"):
+                        restored_uuid = getattr(actuator, "managed_uuid_for_idx")(
+                            gpu_idx
+                        )
+                    else:
+                        restored_uuid = actuator.get_uuid(gpu_idx)
                 except Exception as e:
                     # UUID lookup failure post-restore is benign: the GPU
                     # is already at default, so a stale entry in
@@ -533,8 +558,12 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
     expressly so the guard survives the migration; see actuator.py
     `Actuator` Protocol and design doc §6.1.
     """
-    global _previously_managed
-    _previously_managed = _load_previously_managed_gpus()
+    # Reload IN PLACE — never rebind `_previously_managed`, or the alias to
+    # `managed_state.previously_managed` (shared with the actuator's module
+    # copy) would split and re-introduce the dual-copy bug.
+    reloaded = _load_previously_managed_gpus()
+    _previously_managed.clear()
+    _previously_managed.update(reloaded)
     for gpu_idx in range(actuator.device_count()):
         try:
             uuid = actuator.get_uuid(gpu_idx)
@@ -545,7 +574,9 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
             current_w = actuator.current_w(gpu_idx)
             default_w = actuator.default_w(gpu_idx)
             if current_w < default_w:
-                actuator.restore_default(gpu_idx)
+                restore_result = actuator.restore_default(gpu_idx)
+                if restore_result is False:
+                    continue
                 logger.info(
                     "Restored orphaned cap on idle GPU %d (%d W → %d W).",
                     gpu_idx,
@@ -1011,4 +1042,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Launched as `python /app/power_agent.py`, this file is module `__main__`
+    # while the actuator reaches the agent via `import power_agent` — two
+    # distinct module objects. That is SAFE here because all shared mutable
+    # state lives in `managed_state` (imported by canonical name from both),
+    # so the two module copies' `_managed_gpu_indices` / `_previously_managed`
+    # aliases converge on one set. See managed_state.py.
     main()

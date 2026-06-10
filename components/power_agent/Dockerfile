@@ -100,7 +100,11 @@ COPY --from=dcgm-vendor /vendor/dcgm-lib    /opt/dcgm/lib
 COPY logger.py /opt/dcgm/python/logger.py
 
 WORKDIR /app
-COPY power_agent.py actuator.py /app/
+# managed_state.py holds the single source of truth for managed-GPU state.
+# It MUST ship alongside power_agent.py / actuator.py — power_agent.py does
+# `import managed_state` at module load, so a missing file fails loudly at
+# startup with `ModuleNotFoundError: No module named 'managed_state'`.
+COPY power_agent.py actuator.py managed_state.py /app/
 
 USER 0
 

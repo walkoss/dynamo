@@ -42,7 +42,7 @@ at install time, no auto-detection.
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace dynamo-system \
   --create-namespace \
-  --set image.tag=v1.1.0 \
+  --set image.tag=v1.2.0 \
   --set agent.safeDefaultWatts=500
 ```
 
@@ -69,7 +69,7 @@ namespace, override `agent.dcgm.host` accordingly.
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace dynamo-system \
   --create-namespace \
-  --set image.tag=v1.1.0 \
+  --set image.tag=v1.2.0 \
   --set agent.actuator=dcgm \
   --set agent.safeDefaultWatts=500
 ```
@@ -121,7 +121,7 @@ template time. Pin **either** a release tag (matching the chart's
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace dynamo-system \
   --create-namespace \
-  --set image.tag=v1.1.0 \
+  --set image.tag=v1.2.0 \
   --set agent.safeDefaultWatts=500
 
 # Digest form — strict content-addressed reproducibility. Renders
@@ -165,14 +165,15 @@ an externally-created ConfigMap. This shortens the edit-deploy-test
 loop: edit the scripts locally, update the ConfigMap, restart the Pod.
 
 > **Step 1 (REQUIRED before `helm install`).** Create the script ConfigMap.
-> Both files MUST be included — `power_agent.py` imports `actuator.py`
-> at module load (chart v1.1.0+), and a single-file ConfigMap will
-> fail with `ModuleNotFoundError: No module named 'actuator'`.
+> All three files MUST be included — `power_agent.py` imports `actuator.py`
+> and `managed_state.py` at module load (chart v1.3.0+), and an incomplete
+> ConfigMap will fail with `ModuleNotFoundError`.
 >
 > ```bash
 > kubectl create configmap dynamo-power-agent-script \
 >   --from-file=power_agent.py=components/power_agent/power_agent.py \
 >   --from-file=actuator.py=components/power_agent/actuator.py \
+>   --from-file=managed_state.py=components/power_agent/managed_state.py \
 >   -n $NAMESPACE
 > ```
 >
@@ -195,7 +196,7 @@ loop: edit the scripts locally, update the ConfigMap, restart the Pod.
 > ```bash
 > --set agent.actuator=dcgm \
 > --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent \
-> --set dev.image.tag=v1.1.0
+> --set dev.image.tag=v1.2.0
 > ```
 >
 > Script iteration via the ConfigMap mount still works against this
@@ -208,7 +209,7 @@ Step 2: install in dev mode.
 ```bash
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace $NAMESPACE \
-  --set image.tag=v1.1.0 \
+  --set image.tag=v1.2.0 \
   --set daemonset.enabled=false \
   --set dev.enabled=true \
   --set dev.nodeName=<gpu-node-name>
@@ -229,12 +230,13 @@ resolution while iterating, override with:
 --set dev.namespaceRestrictedOverride=true
 ```
 
-Update flow (after editing `power_agent.py` or `actuator.py`):
+Update flow (after editing `power_agent.py`, `actuator.py`, or `managed_state.py`):
 
 ```bash
 kubectl create configmap dynamo-power-agent-script \
   --from-file=power_agent.py=components/power_agent/power_agent.py \
   --from-file=actuator.py=components/power_agent/actuator.py \
+  --from-file=managed_state.py=components/power_agent/managed_state.py \
   -n $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl delete pod power-agent-dev -n $NAMESPACE
@@ -246,7 +248,7 @@ kubectl delete pod power-agent-dev -n $NAMESPACE
 | Key | Meaning | Default |
 |-----|---------|---------|
 | `image.repository` | Power Agent image registry path | `nvcr.io/nvidia/ai-dynamo/power-agent` |
-| `image.tag` | Release tag (e.g. `v1.1.0`). Set EITHER this OR `image.digest`. `latest` is rejected. | `""` |
+| `image.tag` | Release tag (e.g. `v1.2.0`). Set EITHER this OR `image.digest`. `latest` is rejected. | `""` |
 | `image.digest` | Content-addressed digest (`sha256:<hex>`). When set, the image renders as `{repository}@{digest}` (canonical OCI form). Mutually exclusive with `image.tag`. | `""` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets list | `[]` |
@@ -271,8 +273,8 @@ kubectl delete pod power-agent-dev -n $NAMESPACE
 | `daemonset.podLabels` / `podAnnotations` / `affinity` | Standard DS overrides | `{}` |
 | `dev.enabled` | Render dev Pod instead of DaemonSet (mutually exclusive) | `false` |
 | `dev.nodeName` | Required when `dev.enabled=true`; GPU node to pin to | `""` |
-| `dev.scriptConfigMap` | Externally created ConfigMap holding **both** `power_agent.py` and `actuator.py` (chart v1.1.0+; a ConfigMap with only `power_agent.py` will `ModuleNotFoundError: No module named 'actuator'` at pod start) | `dynamo-power-agent-script` |
-| `dev.image.repository` / `dev.image.tag` | Dev container image. Default `vllm-runtime` ships pynvml (NVML actuator works out of the box). **For DCGM dev mode**, override to the production power-agent image which vendors pydcgm + libdcgm.so: `--set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent --set dev.image.tag=v1.1.0`. Script iteration via ConfigMap mount still works because `/scripts` overrides `/app` at runtime. | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1` |
+| `dev.scriptConfigMap` | Externally created ConfigMap holding **all three** of `power_agent.py`, `actuator.py`, and `managed_state.py` (chart v1.3.0+; a ConfigMap missing `actuator.py` or `managed_state.py` will `ModuleNotFoundError: No module named 'actuator'` / `'managed_state'` at pod start) | `dynamo-power-agent-script` |
+| `dev.image.repository` / `dev.image.tag` | Dev container image. Default `vllm-runtime` ships pynvml (NVML actuator works out of the box). **For DCGM dev mode**, override to the production power-agent image which vendors pydcgm + libdcgm.so: `--set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent --set dev.image.tag=v1.2.0`. Script iteration via ConfigMap mount still works because `/scripts` overrides `/app` at runtime. | `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1` |
 | `dev.namespaceRestrictedOverride` | Set `true` to allow cluster-wide RBAC in dev mode (rare; for cross-namespace multi-pod testing only) | `false` |
 
 See [`values.yaml`](./values.yaml) for the full configuration surface and

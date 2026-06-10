@@ -134,8 +134,13 @@ class Actuator(Protocol):
         """
         ...
 
-    def restore_default(self, gpu_idx: int) -> None:
-        """Restore the factory-default TGP for the GPU."""
+    def restore_default(self, gpu_idx: int) -> Optional[bool]:
+        """Restore the factory-default TGP for the GPU.
+
+        Return False only when the restore was intentionally skipped because
+        the managed physical GPU is no longer visible; None/True mean the
+        restore path completed.
+        """
         ...
 
 
@@ -274,7 +279,7 @@ class NvmlActuator:
             # remain consistent.
             return watts
 
-    def restore_default(self, gpu_idx: int) -> None:
+    def restore_default(self, gpu_idx: int) -> Optional[bool]:
         """Restore the factory-default TGP via NVML.
 
         Mirrors the inline NVML calls in `power_agent._handle_sigterm`
@@ -288,6 +293,7 @@ class NvmlActuator:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
         pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
+        return True
 
 
 class DcgmActuator:
@@ -380,6 +386,12 @@ class DcgmActuator:
         # because DCGM may re-enumerate after the hostengine restart.
         self._dcgm_uuid_by_idx: Optional[list[str]] = None
         self._nvml_index_by_uuid: Optional[dict[str, int]] = None
+
+        # In-process restore identity snapshot. `_managed_gpu_indices` stores
+        # the reconcile-loop integer index, but DCGM may re-enumerate after a
+        # hostengine restart. Keep the UUID we actually capped so SIGTERM
+        # restore can relocate the physical GPU before writing default TGP.
+        self._managed_uuid_by_idx: dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1011,7 +1023,9 @@ class DcgmActuator:
 
         power_agent._managed_gpu_indices.add(gpu_idx)
         try:
-            power_agent._record_managed_gpu_by_uuid(self.get_uuid(gpu_idx))
+            uuid = self.get_uuid(gpu_idx)
+            self._managed_uuid_by_idx[gpu_idx] = uuid
+            power_agent._record_managed_gpu_by_uuid(uuid)
         except Exception as e:
             # UUID lookup failure is non-fatal: the cap was applied,
             # only the persistent orphan-recovery record is missed.
@@ -1023,7 +1037,7 @@ class DcgmActuator:
         if self._metrics is not None:
             self._metrics.applied_limit_watts.labels(gpu=str(gpu_idx)).set(watts)
 
-    def restore_default(self, gpu_idx: int) -> None:
+    def restore_default(self, gpu_idx: int) -> Optional[bool]:
         """Restore factory-default TGP by reading field 163 then re-capping.
 
         Goes through `_apply_cap_inner` (not `apply_cap`) so DCGM
@@ -1032,7 +1046,138 @@ class DcgmActuator:
         in-constraints by definition, so skipping `apply_cap`'s
         re-clamp is safe.
         """
-        self._apply_cap_inner(gpu_idx, self.default_w(gpu_idx))
+        restore_idx = self._resolve_managed_idx(gpu_idx)
+        if restore_idx is None:
+            return False
+        self._apply_cap_inner(restore_idx, self.default_w(restore_idx))
+        return True
+
+    def managed_uuid_for_idx(self, gpu_idx: int) -> str:
+        """Return the UUID originally capped for `gpu_idx`, if known.
+
+        `power_agent._handle_sigterm` uses this after a successful restore to
+        prune `managed_gpus.json`. If DCGM re-enumerated and `restore_default`
+        relocated the write, pruning by `get_uuid(gpu_idx)` would remove the
+        wrong UUID.
+        """
+        return self._managed_uuid_by_idx.get(gpu_idx) or self.get_uuid(gpu_idx)
+
+    def _resolve_managed_idx(self, gpu_idx: int) -> Optional[int]:
+        """Resolve the *current* index to restore for a managed `gpu_idx`.
+
+        DCGM may re-enumerate after a hostengine restart, so the integer
+        index recorded at cap time can point at a different physical GPU by
+        SIGTERM. We relocate by the UUID we actually capped.
+
+        The fallback rule turns on whether the index is PROVEN wrong:
+
+        * Identity unreadable (the `get_uuid(gpu_idx)` probe itself raised) —
+          mismatch is NOT proven. DCGM may be briefly down; we best-effort
+          restore at the original index and let `_apply_cap_inner`'s own
+          reconnect-and-retry attempt the write. We have not shown the index
+          is wrong, so this cannot target a known-wrong GPU.
+        * Proven mismatch (`get_uuid(gpu_idx) != want_uuid`) — the original
+          index now hosts a DIFFERENT physical GPU, so writing default TGP
+          there would clobber an unrelated GPU AND (because the SIGTERM caller
+          prunes `want_uuid` after a "successful" restore) drop the actually-
+          capped GPU from `managed_gpus.json`, leaking its cap permanently.
+          We therefore NEVER fall back to the original index after a proven
+          mismatch: we relocate to the index that currently hosts `want_uuid`,
+          or, if it can't be located (gone, or the scan was inconclusive),
+          return ``None`` to skip without writing or pruning so cold-start
+          orphan recovery retries on the next boot.
+        """
+        want_uuid = self._managed_uuid_by_idx.get(gpu_idx)
+        if want_uuid is None:
+            # No recorded identity (UUID read failed at cap time). Nothing to
+            # relocate against; restore at the original index.
+            return gpu_idx
+
+        try:
+            current_uuid = self.get_uuid(gpu_idx)
+        except Exception as e:
+            # Can't verify identity -> mismatch NOT proven. Do NOT treat this
+            # as "GPU gone" (transient hostengine blip vs hardware removal),
+            # and the index isn't shown to be wrong, so best-effort restore
+            # at the original index; the cap-write retry path may reconnect.
+            logger.warning(
+                "Could not verify managed GPU index %d (capped UUID %s) "
+                "before restore; attempting best-effort restore at the "
+                "original index: %s",
+                gpu_idx,
+                want_uuid,
+                e,
+            )
+            return gpu_idx
+
+        if current_uuid == want_uuid:
+            return gpu_idx
+
+        # PROVEN mismatch: gpu_idx now hosts a DIFFERENT physical GPU
+        # (current_uuid), so writing default TGP there is wrong. Relocate to
+        # the index that currently hosts the capped UUID, or skip entirely —
+        # never write to the known-wrong original index.
+        relocated_idx, scan_complete = self._resolve_idx_for_uuid(want_uuid)
+        if relocated_idx is not None:
+            logger.warning(
+                "Managed GPU index %d now resolves to UUID %s; restoring "
+                "capped UUID %s at its current index %d.",
+                gpu_idx,
+                current_uuid,
+                want_uuid,
+                relocated_idx,
+            )
+            return relocated_idx
+
+        # Could not locate the capped UUID. Skip without writing to the
+        # known-wrong original index and without pruning (the SIGTERM caller
+        # leaves want_uuid in managed_gpus.json so orphan recovery retries).
+        if scan_complete:
+            logger.warning(
+                "Managed GPU UUID %s is no longer visible after DCGM "
+                "re-enumeration (index %d now hosts UUID %s); skipping "
+                "default restore. Cold-start orphan recovery will retry.",
+                want_uuid,
+                gpu_idx,
+                current_uuid,
+            )
+        else:
+            logger.warning(
+                "Managed GPU UUID %s could not be located after a proven "
+                "index mismatch (index %d now hosts UUID %s; relocation scan "
+                "incomplete); skipping default restore rather than risk "
+                "writing to the wrong GPU. Cold-start orphan recovery will "
+                "retry.",
+                want_uuid,
+                gpu_idx,
+                current_uuid,
+            )
+        return None
+
+    def _resolve_idx_for_uuid(self, uuid: str) -> tuple[Optional[int], bool]:
+        """Find the current index whose UUID matches `uuid`.
+
+        Returns ``(idx, scan_complete)``. ``scan_complete`` is True only when
+        every GPU was inspected without error, so callers can distinguish a
+        positive "not present" (clean scan, no match) from an indeterminate
+        result (a probe raised, e.g. a transient DCGM outage). Callers must
+        not treat an incomplete scan as proof the GPU is gone.
+        """
+        scan_complete = True
+        for idx in range(len(self._discovered_gpu_ids)):
+            try:
+                if self.get_uuid(idx) == uuid:
+                    return idx, True
+            except Exception as e:
+                scan_complete = False
+                logger.warning(
+                    "Failed to inspect GPU index %d while resolving managed "
+                    "UUID %s: %s",
+                    idx,
+                    uuid,
+                    e,
+                )
+        return None, scan_complete
 
     # ------------------------------------------------------------------
     # Internal helpers

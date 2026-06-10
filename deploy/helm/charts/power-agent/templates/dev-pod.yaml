@@ -16,6 +16,7 @@
 #   kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
 #     --from-file=power_agent.py=components/power_agent/power_agent.py \
 #     --from-file=actuator.py=components/power_agent/actuator.py \
+#     --from-file=managed_state.py=components/power_agent/managed_state.py \
 #     -n {{ .Release.Namespace }}
 #
 # The actuator.py mount was added in chart v1.1.0 — power_agent.py
@@ -23,6 +24,10 @@
 # ConfigMap that only carries power_agent.py will ImportError on
 # startup. A v1.0.0-style single-file ConfigMap will fail clearly with
 # `ModuleNotFoundError: No module named 'actuator'`.
+# managed_state.py was added in chart v1.3.0 — power_agent.py and
+# actuator.py share their managed-GPU state through it, so a ConfigMap
+# missing it fails with `ModuleNotFoundError: No module named
+# 'managed_state'`.
 
 {{- if .Values.dev.enabled }}
 apiVersion: v1
@@ -115,6 +120,13 @@ spec:
           # ConfigMap was created without --from-file=actuator.py=...
           - key: actuator.py
             path: actuator.py
+            mode: 0o644
+          # managed_state.py was added in chart v1.3.0. power_agent.py and
+          # actuator.py share their managed-GPU state through it; the dev pod
+          # will `ModuleNotFoundError: No module named 'managed_state'` if the
+          # ConfigMap was created without --from-file=managed_state.py=...
+          - key: managed_state.py
+            path: managed_state.py
             mode: 0o644
     - name: state
       hostPath:

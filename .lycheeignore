@@ -19,8 +19,11 @@
 ^https://martinfowler\.com/articles/practical-test-pyramid\.html
 
 # NVIDIA docs site intermittently returns 404 to GitHub runners for these
-# deployment-guide paths (verified 2026-06-08; links work in-browser).
-^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/
+# specific deployment-guide pages (verified 2026-06-08; links work in-browser).
+# Keep these exact so new / renamed deployment-guide links are still checked.
+^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/deployment-guide$
+^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/deployment-guide/dgdr-reference$
+^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery$
 
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$

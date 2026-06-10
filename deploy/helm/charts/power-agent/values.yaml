@@ -191,18 +191,21 @@ daemonset:
   affinity: {}
 
 # In-cluster dev-iteration mode. Renders a single Pod (not a DaemonSet)
-# that mounts both power_agent.py AND actuator.py from a ConfigMap.
-# The caller is responsible for creating the ConfigMap separately
-# BEFORE `helm install`; both files are required because power_agent.py
-# does `from actuator import ...` at module load (chart v1.1.0+):
+# that mounts power_agent.py, actuator.py AND managed_state.py from a
+# ConfigMap. The caller is responsible for creating the ConfigMap
+# separately BEFORE `helm install`; all three files are required because
+# power_agent.py does `from actuator import ...` and `import managed_state`
+# at module load (actuator.py since chart v1.1.0+, managed_state.py since
+# chart v1.3.0+):
 #
 #   kubectl create configmap dynamo-power-agent-script \
 #     --from-file=power_agent.py=components/power_agent/power_agent.py \
 #     --from-file=actuator.py=components/power_agent/actuator.py \
+#     --from-file=managed_state.py=components/power_agent/managed_state.py \
 #     -n $NAMESPACE
 #
 # Without this ConfigMap the dev pod will stay Pending with a
-# `MountVolume.SetUp failed for volume "script"` event; a single-file
+# `MountVolume.SetUp failed for volume "script"` event; an incomplete
 # ConfigMap will start the pod but ImportError immediately.
 #
 # Mutually exclusive with daemonset.enabled (chart fails to render if both
@@ -225,7 +228,7 @@ dev:
   # override repository + tag to the production power-agent image,
   # which vendors the required pydcgm bindings and libdcgm.so:
   #   --set dev.image.repository=nvcr.io/nvidia/ai-dynamo/power-agent
-  #   --set dev.image.tag=v1.1.0
+  #   --set dev.image.tag=v1.2.0
   # Script-iteration via the ConfigMap mount still works against the
   # power-agent image (the /scripts mount overrides /app at runtime).
   image:

@@ -20,11 +20,36 @@ This file covers three scenarios:
      _shutdown event still fires.
 """
 
+import os
+import runpy
 import signal
 import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
+
+
+class TestMainEntrypoint(unittest.TestCase):
+    def test_fresh_module_copy_shares_managed_state(self):
+        """A second, independently-executed copy of power_agent.py — exactly
+        what `python /app/power_agent.py` (module `__main__`) plus the
+        actuator's `import power_agent` produce — must alias the SAME
+        managed-state objects. Otherwise caps recorded through one copy are
+        invisible to the SIGTERM handler running in the other, and every cap
+        leaks past graceful shutdown.
+        """
+        import managed_state
+
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "power_agent.py"
+        )
+
+        # run_name != "__main__" so the entrypoint guard does not invoke main().
+        ns = runpy.run_path(path, run_name="power_agent_fresh_copy")
+
+        self.assertIs(ns["_managed_gpu_indices"], managed_state.managed_gpu_indices)
+        self.assertIs(ns["_previously_managed"], managed_state.previously_managed)
+        self.assertEqual(ns["_MANAGED_STATE_PATH"], managed_state.MANAGED_STATE_PATH)
 
 
 class _SigtermTestBase(unittest.TestCase):
@@ -274,6 +299,54 @@ class TestSigtermPrunesManagedGpusState(_SigtermTestBase):
         self.assertEqual(power_agent._previously_managed, {"uuid-stale"})
         # State persisted exactly once with the pruned set.
         persist.assert_called_once_with({"uuid-stale"})
+
+    def test_successful_restore_prunes_actuator_managed_uuid_when_available(self):
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.update({"uuid-capped", "uuid-now-at-index"})
+
+        class _DcgmLikeActuator:
+            name = "dcgm"
+
+            def __init__(self):
+                self.restore_default = MagicMock()
+                self.shutdown = MagicMock()
+                self.get_uuid = MagicMock(return_value="uuid-now-at-index")
+                self._managed_uuid_for_idx = MagicMock(return_value="uuid-capped")
+
+            def managed_uuid_for_idx(self, gpu_idx):
+                return self._managed_uuid_for_idx(gpu_idx)
+
+        actuator = _DcgmLikeActuator()
+        power_agent._active_actuator = actuator
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch.object(power_agent, "_persist_managed_gpus") as persist:
+                power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        actuator.restore_default.assert_called_once_with(0)
+        actuator._managed_uuid_for_idx.assert_called_once_with(0)
+        actuator.get_uuid.assert_not_called()
+        self.assertEqual(power_agent._previously_managed, {"uuid-now-at-index"})
+        persist.assert_called_once_with({"uuid-now-at-index"})
+
+    def test_skipped_restore_does_not_prune(self):
+        power_agent._managed_gpu_indices.add(0)
+        power_agent._previously_managed.add("uuid-capped")
+
+        actuator = MagicMock()
+        actuator.name = "dcgm"
+        actuator.restore_default.return_value = False
+        actuator.get_uuid.return_value = "uuid-capped"
+        power_agent._active_actuator = actuator
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch.object(power_agent, "_persist_managed_gpus") as persist:
+                power_agent._handle_sigterm(signal.SIGTERM, None)
+
+        actuator.restore_default.assert_called_once_with(0)
+        actuator.get_uuid.assert_not_called()
+        self.assertEqual(power_agent._previously_managed, {"uuid-capped"})
+        persist.assert_called_once_with({"uuid-capped"})
 
     def test_failed_restore_does_not_prune(self):
         """If `restore_default` raises, the cap may still be live — we

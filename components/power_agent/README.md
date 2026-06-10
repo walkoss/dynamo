@@ -36,16 +36,16 @@ Pin a release tag (the chart rejects `:latest`):
 helm install power-agent ./deploy/helm/charts/power-agent \
   --namespace dynamo-system \
   --create-namespace \
-  --set image.tag=v1.1.0 \
+  --set image.tag=v1.2.0 \
   --set agent.safeDefaultWatts=500
 ```
 
 > Pin `image.tag` to match the chart's `appVersion`
 > (`helm show chart deploy/helm/charts/power-agent | grep appVersion`).
 > Chart v1.1.0+ renders new `--actuator` / `--dcgm-*` CLI flags and
-> `power_agent.py` imports a v1.1.0-only `actuator` module — pinning
-> an older image tag with a newer chart will CrashLoopBackOff at
-> pod start.
+> `power_agent.py` imports the `actuator` module (v1.1.0+) and the
+> `managed_state` module (v1.2.0+) — pinning an older image tag with a
+> newer chart will CrashLoopBackOff / `ModuleNotFoundError` at pod start.
 
 See the [chart README](../../deploy/helm/charts/power-agent/README.md) for
 per-SKU `safeDefaultWatts` recommendations, the in-cluster dev-iteration
