@@ -1,14 +1,17 @@
 # Power Agent — Helm Chart Packaging Plan
 
 **Status:** Implemented — chart shipped at `deploy/helm/charts/power-agent/`
-(`Chart.yaml` `version: 1.2.0`, `appVersion: "1.1.0"`). v1.0.0 of the chart
+(`Chart.yaml` `version: 1.3.0`, `appVersion: "1.2.0"`). v1.0.0 of the chart
 landed in [PR #9682](https://github.com/ai-dynamo/dynamo/pull/9682) (PR 1a of
 the PR-9369 split, base of this plan); v1.1.0 added the DCGM actuator in
 [PR #9790](https://github.com/ai-dynamo/dynamo/pull/9790), whose end-to-end
 design is captured in `docs/design-docs/power-agent-dual-actuator.md`; v1.2.0
 landed within PR #9790 as image-pinning hardening (`image.digest` field +
 canonical-OCI-form renderer + strict SHA-256 / whitespace / digest-on-tag
-guards). The container image is built from `components/power_agent/Dockerfile`
+guards); v1.3.0 (also PR #9790) moved the agent's managed-GPU state into a
+standalone `managed_state.py` module shared by `power_agent.py` and
+`actuator.py`, advancing `appVersion` to 1.2.0. The container image is built
+from `components/power_agent/Dockerfile`
 by the `power-agent` CI job. This plan is the **chart-shape source of truth**.
 **Author:** Kai Ma
 **Date:** 2026-05-19 (initial); refreshed 2026-06-03 (rebased #9682 build wiring + #9790 dual-actuator + image.digest alignment)
@@ -381,7 +384,7 @@ against the decisions recorded here.
 
 ```
 deploy/helm/charts/power-agent/
-├── Chart.yaml                          # name: power-agent, version: 1.2.0, appVersion: "1.1.0"
+├── Chart.yaml                          # name: power-agent, version: 1.3.0, appVersion: "1.2.0"
 ├── README.md                           # install + values table + uninstall + troubleshooting
 ├── values.yaml                         # see §4.2
 ├── .helmignore                         # copied verbatim from snapshot chart
@@ -1158,7 +1161,7 @@ Mirror of `pr9369-split-plan.md` §7, scoped to this work:
 - [ ] Run `helm lint` on the chart — zero errors.
 - [ ] Run the four `helm template` exercises from §5.4 (default / namespace-restricted / dev-mode / DCGM actuator) and confirm each renders to valid manifests.
 - [ ] Run the four negative-path `helm template` exercises (missing image tag, mutex violation, invalid actuator, invalid enforce) and confirm all four fail with the §4.4 helper messages.
-- [ ] Run `helm unittest deploy/helm/charts/power-agent` — expect `46 passed, 0 failed` on the v1.2.0 chart (24 for the v1.1.0 actuator/enforce validators + 22 added in v1.2.0 by `validate_image_tag_test.yaml`). Run again whenever the test files change to refresh the expected number rather than hardcoding it across the doc.
+- [ ] Run `helm unittest deploy/helm/charts/power-agent` — expect `49 passed, 0 failed` on the v1.3.0 chart (46 from the v1.1.0/v1.2.0 actuator/enforce/image-tag validators + 3 added in v1.3.0). Run again whenever the test files change to refresh the expected number rather than hardcoding it across the doc.
 
 **Doc touch-up:**
 
