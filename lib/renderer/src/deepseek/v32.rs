@@ -109,29 +109,7 @@ fn render_message(
             if thinking_mode == ThinkingMode::Thinking
                 && last_user_idx.is_some_and(|idx| index > idx)
             {
-                let reasoning = msg.get("reasoning_content").and_then(|v| match v {
-                    serde_json::Value::String(s) => {
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s.clone())
-                        }
-                    }
-                    serde_json::Value::Array(arr) => {
-                        let joined = arr
-                            .iter()
-                            .filter_map(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if joined.is_empty() {
-                            None
-                        } else {
-                            Some(joined)
-                        }
-                    }
-                    _ => None,
-                });
+                let reasoning = super::common::extract_reasoning_content(msg);
 
                 if let Some(reasoning) = reasoning {
                     // DON'T add THINKING_START - it was already added in user message

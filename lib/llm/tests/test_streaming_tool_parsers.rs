@@ -1346,6 +1346,114 @@ mod tests {
         run_deepseek_v4_tool_call_fixture(&file_path).await;
     }
 
+    /// DeepSeek V4 interleaved thinking per the spec
+    /// (api-docs.deepseek.com/guides/thinking_mode#tool-calls): one generation
+    /// alternates reasoning and DSML tool-call blocks —
+    /// think r1 → block 1 (2 invokes) → think r2 → block 2 → think r3 → answer.
+    /// Beyond the aggregate checks, this pins the DELTA ORDERING contract:
+    /// r2's reasoning deltas must stream out after block 1's tool-call deltas
+    /// and before block 2's, so clients can reconstruct the interleaving.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_interleaved_thinking_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_interleaved_thinking.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v4".to_string()),
+            Some("deepseek_v4".to_string()),
+        )
+        .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate checks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "All three reasoning segments must be extracted in order",
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Only the final answer should reach content",
+        );
+
+        // All three tool calls parsed, with chunk indices continuing across blocks
+        assert_eq!(
+            aggregated.tool_calls.len(),
+            3,
+            "tool calls: {:?}",
+            aggregated.tool_calls
+        );
+        for (i, (expected, actual)) in test_data
+            .expected_tool_calls
+            .iter()
+            .zip(aggregated.tool_calls.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                actual["index"].as_u64(),
+                Some(i as u64),
+                "tool call chunk index must continue across DSML blocks"
+            );
+            assert_eq!(actual["function"]["name"], expected["function"]["name"]);
+            let actual_args: serde_json::Value =
+                serde_json::from_str(actual["function"]["arguments"].as_str().unwrap()).unwrap();
+            let expected_args: serde_json::Value =
+                serde_json::from_str(expected["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(actual_args, expected_args, "tool call {} arguments", i);
+        }
+
+        // Delta ordering: locate the emission position of each tool-call block and
+        // of the between-block reasoning (r2).
+        let mut block1_pos = None;
+        let mut block2_pos = None;
+        let mut r2_pos = None;
+        for (pos, chunk) in output_chunks.iter().enumerate() {
+            let Some(data) = chunk.data.as_ref() else {
+                continue;
+            };
+            for choice in &data.inner.choices {
+                if let Some(tool_calls) = choice.delta.tool_calls.as_ref() {
+                    for tc in tool_calls {
+                        match tc.index {
+                            0 | 1 => block1_pos.get_or_insert(pos),
+                            _ => block2_pos.get_or_insert(pos),
+                        };
+                    }
+                }
+                if let Some(reasoning) = choice.delta.reasoning_content.as_deref()
+                    && reasoning.contains("Results in hand")
+                {
+                    r2_pos.get_or_insert(pos);
+                }
+            }
+        }
+        let (b1, b2, r2) = (
+            block1_pos.expect("block 1 tool calls missing"),
+            block2_pos.expect("block 2 tool call missing"),
+            r2_pos.expect("between-block reasoning missing"),
+        );
+        assert!(
+            b1 < r2 && r2 < b2,
+            "interleaved delta ordering violated: block1@{}, r2@{}, block2@{}",
+            b1,
+            r2,
+            b2
+        );
+
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for interleaved case"
+        );
+    }
+
     /// `TOOLCALLING.stream.4.a` — stream ends after a complete invoke but before
     /// `</｜DSML｜tool_calls>`. Finalization should recover the complete invoke
     /// without enabling early stream exit on unterminated DSML wrappers.

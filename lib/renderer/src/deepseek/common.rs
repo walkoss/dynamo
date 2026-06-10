@@ -208,6 +208,27 @@ pub(crate) fn find_last_user_index(messages: &[JsonValue]) -> Option<usize> {
         .map(|(idx, _)| idx)
 }
 
+/// Extract a message's `reasoning_content` as a flat string.
+///
+/// Accepts both protocol wire forms (see `ReasoningContent` in
+/// dynamo-protocols): a plain string, or an array of interleaved reasoning
+/// segments — `segments[i]` preceded `tool_calls[i]` in the original turn —
+/// which are joined with newlines for prompt reconstruction. Empty content
+/// (empty string, empty array, or all-empty segments) returns `None`.
+pub(crate) fn extract_reasoning_content(msg: &JsonValue) -> Option<String> {
+    let flat = match msg.get("reasoning_content")? {
+        JsonValue::String(s) => s.clone(),
+        JsonValue::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    if flat.is_empty() { None } else { Some(flat) }
+}
+
 pub(crate) fn extract_visible_text(content: &JsonValue) -> String {
     match content {
         JsonValue::String(text) => text.clone(),

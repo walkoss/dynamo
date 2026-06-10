@@ -684,4 +684,111 @@ mod tests {
         assert_eq!(all_reasoning, "Weighing options.");
         assert_eq!(all_content, "Beijing is sunny.");
     }
+
+    // DeepSeek V4 interleaved thinking (api-docs.deepseek.com/guides/thinking_mode#tool-calls):
+    // one generation may alternate reasoning and tool-call blocks. The reasoning
+    // parser must re-enter reasoning mode on each subsequent <think> and pass the
+    // DSML tool-call markup through as normal text byte-exact.
+
+    // Interleave with prompt-injected start: the stream begins inside a think
+    // block (template seeded <think>), closes it, emits DSML, then re-opens a
+    // second think block. Tags split across chunks to exercise buffering.
+    #[test]
+    fn test_deepseek_v4_interleaved_reasoning_reentry_with_injected_start() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+        parser.set_in_reasoning(true);
+
+        let tokens = &[
+            "I should check the weather.",
+            "</",
+            "think",
+            ">",
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+            "<th",
+            "ink>",
+            "Now compare the two cities.",
+            "</think>",
+            "Final answer.",
+        ];
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+        let fin = parser.finish_reasoning_stream();
+        all_reasoning.push_str(&fin.reasoning_text);
+        all_content.push_str(&fin.normal_text);
+
+        assert_eq!(
+            all_reasoning,
+            "I should check the weather.Now compare the two cities."
+        );
+        assert_eq!(
+            all_content,
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>Final answer."
+        );
+    }
+
+    // DSML markers passing through normal mode must not be eaten by the
+    // partial-<think> overlap buffering: a lone `<` and the `｜DSML｜` token
+    // arriving as separate chunks still reach normal_text byte-exact.
+    #[test]
+    fn test_deepseek_v4_dsml_passthrough_split_chunks() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+
+        let tokens = &[
+            "<think>",
+            "plan the call",
+            "</think>",
+            "<",
+            "｜DSML｜tool_calls>",
+            "\n<",
+            "｜DSML｜invoke name=\"f\">",
+            "\n</",
+            "｜DSML｜invoke>",
+            "\n</",
+            "｜DSML｜tool_calls>",
+        ];
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        for token in tokens {
+            let r = parser.parse_reasoning_streaming_incremental(token, &[]);
+            all_reasoning.push_str(&r.reasoning_text);
+            all_content.push_str(&r.normal_text);
+        }
+        let fin = parser.finish_reasoning_stream();
+        all_reasoning.push_str(&fin.reasoning_text);
+        all_content.push_str(&fin.normal_text);
+
+        assert_eq!(all_reasoning, "plan the call");
+        assert_eq!(
+            all_content,
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        );
+    }
+
+    // Full interleave delivered in a single chunk: the inner state-machine loop
+    // must exhaust every transition (think → DSML → think → DSML → think → answer)
+    // without buffering content past end-of-chunk.
+    #[test]
+    fn test_deepseek_v4_interleaved_single_chunk() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
+
+        let input = "<think>r1</think><｜DSML｜tool_calls>A</｜DSML｜tool_calls><think>r2</think><｜DSML｜tool_calls>B</｜DSML｜tool_calls><think>r3</think>answer";
+        let r = parser.parse_reasoning_streaming_incremental(input, &[]);
+        let fin = parser.finish_reasoning_stream();
+
+        assert_eq!(
+            format!("{}{}", r.reasoning_text, fin.reasoning_text),
+            "r1r2r3"
+        );
+        assert_eq!(
+            format!("{}{}", r.normal_text, fin.normal_text),
+            "<｜DSML｜tool_calls>A</｜DSML｜tool_calls><｜DSML｜tool_calls>B</｜DSML｜tool_calls>answer"
+        );
+    }
 }

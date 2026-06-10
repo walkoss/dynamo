@@ -1,0 +1,259 @@
+{
+  "expected_output": {
+    "normal_content": "Here is the weather summary.",
+    "reasoning_content": "I need the weather in Beijing and Shanghai.Results in hand, now fetch the forecast for tomorrow.I have everything I need.",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "arguments": "{\"city\": \"Beijing\"}"
+        }
+      },
+      {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "arguments": "{\"city\": \"Shanghai\"}"
+        }
+      },
+      {
+        "id": "call_3",
+        "type": "function",
+        "function": {
+          "name": "get_forecast",
+          "arguments": "{\"city\": \"Beijing\", \"days\": 3}"
+        }
+      }
+    ]
+  },
+  "input_stream": [
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<th",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "ink>I need the weather in Beijing",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " and Shanghai.</think>",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜tool_calls>\n",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜invoke name=\"get_weather\">\n",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜parameter name=\"city\" string=\"true\">Beijing</｜DSML｜parameter>\n",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "</｜DSML｜invoke>\n",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Shanghai</｜DSML｜parameter>\n</｜DSML｜invoke>\n",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "</｜DSML｜tool_",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "calls>",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<think>Results in hand, now fetch the forecast",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": " for tomorrow.</think>",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_forecast\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Beijing</｜DSML｜parameter>\n<｜DSML｜parameter name=\"days\" string=\"false\">3</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "<think>I have everything I need.</think>",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": "Here is the weather summary.",
+              "role": "assistant"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "data": {
+        "id": "chatcmpl-deepseek-v4-interleaved-thinking",
+        "choices": [
+          {
+            "index": 0,
+            "delta": {
+              "content": null,
+              "role": "assistant"
+            },
+            "finish_reason": "stop"
+          }
+        ]
+      }
+    }
+  ]
+}

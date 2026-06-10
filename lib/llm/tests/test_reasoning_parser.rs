@@ -903,4 +903,82 @@ mod tests {
         assert_eq!(content, "Final answer here.");
         assert!(!content.contains("</think>"));
     }
+
+    /// DeepSeek V4 interleaved thinking on a tool-continuation turn
+    /// (api-docs.deepseek.com/guides/thinking_mode#tool-calls): the template
+    /// seeded `<think>` so the stream begins mid-reasoning with no opening tag,
+    /// closes it, emits a DSML tool-call block, re-enters reasoning with an
+    /// explicit `<think>`, then a second block. Full pipeline: injected-reasoning
+    /// parser chained into the deepseek_v4 tool-call jail.
+    #[tokio::test]
+    async fn test_deepseek_v4_interleaved_thinking_with_injected_reasoning_and_jail() {
+        let input_chunks = vec![
+            chunk("Need the weather first."),
+            chunk("</think>"),
+            chunk("<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n"),
+            chunk("<｜DSML｜parameter name=\"city\" string=\"true\">Beijing</｜DSML｜parameter>\n"),
+            chunk("</｜DSML｜invoke>\n</｜DSML｜tool_calls>"),
+            chunk("<think>Now the air quality."),
+            chunk("</think>"),
+            chunk("<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_air_quality\">\n"),
+            chunk("<｜DSML｜parameter name=\"city\" string=\"true\">Beijing</｜DSML｜parameter>\n"),
+            chunk("</｜DSML｜invoke>\n</｜DSML｜tool_calls>"),
+        ];
+
+        let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            stream::iter(input_chunks),
+            "deepseek_v4".to_string(),
+            true, // prompt-injected <think>
+        );
+        let tool_parsed_stream = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("deepseek_v4".to_string()),
+            None,
+            None,
+            false,
+            reasoning_parsed_stream,
+        );
+
+        let mut tool_parsed_stream = std::pin::pin!(tool_parsed_stream);
+        let mut output_chunks = Vec::new();
+        while let Some(c) = tool_parsed_stream.next().await {
+            output_chunks.push(c);
+        }
+
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        let mut tool_names = Vec::new();
+        for c in &output_chunks {
+            let Some(data) = c.data.as_ref() else { continue };
+            for choice in &data.inner.choices {
+                if let Some(ref r) = choice.delta.reasoning_content {
+                    all_reasoning.push_str(r);
+                }
+                if let Some(ref content) = choice.delta.content {
+                    all_content.push_str(get_text(content));
+                }
+                if let Some(ref tool_calls) = choice.delta.tool_calls {
+                    for tc in tool_calls {
+                        if let Some(name) = tc.function.as_ref().and_then(|f| f.name.as_deref()) {
+                            tool_names.push((tc.index, name.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            all_reasoning,
+            "Need the weather first.Now the air quality.",
+            "both reasoning segments must be captured"
+        );
+        assert_eq!(all_content, "", "no DSML markup may leak into content");
+        assert_eq!(
+            tool_names,
+            vec![
+                (0, "get_weather".to_string()),
+                (1, "get_air_quality".to_string())
+            ],
+            "both blocks must parse with continuing indices"
+        );
+    }
 }

@@ -383,6 +383,77 @@ mod tests {
                 .unwrap_or(false)
         }
 
+        /// Helper to create a reasoning-only chunk (content=None), the shape the
+        /// upstream reasoning parser emits for text inside <think> blocks.
+        pub fn create_reasoning_chunk(
+            reasoning: String,
+            index: u32,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut chunk = create_mock_response_chunk(String::new(), index);
+            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.role = None;
+            choice.delta.reasoning_content = Some(reasoning);
+            chunk
+        }
+
+        /// Helper to create a chunk carrying both text content and reasoning_content,
+        /// as produced when one upstream chunk straddles a </think> boundary.
+        pub fn create_mixed_response_chunk(
+            content: String,
+            reasoning: String,
+            index: u32,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut chunk = create_mock_response_chunk(content, index);
+            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.reasoning_content = Some(reasoning);
+            chunk
+        }
+
+        /// Helper to reconstruct all reasoning_content from results in emission order
+        pub fn reconstruct_reasoning(
+            results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        ) -> String {
+            results
+                .iter()
+                .filter_map(|r| {
+                    r.data
+                        .as_ref()
+                        .and_then(|d| d.inner.choices.first())
+                        .and_then(|c| c.delta.reasoning_content.as_deref())
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        }
+
+        /// Helper to collect (result_position, tool_call_chunk_index, function_name)
+        /// for every tool call delta across results.
+        pub fn collect_tool_call_positions(
+            results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        ) -> Vec<(usize, u32, String)> {
+            let mut out = Vec::new();
+            for (pos, r) in results.iter().enumerate() {
+                if let Some(tool_calls) = r
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.delta.tool_calls.as_ref())
+                {
+                    for tc in tool_calls {
+                        out.push((
+                            pos,
+                            tc.index,
+                            tc.function
+                                .as_ref()
+                                .and_then(|f| f.name.clone())
+                                .unwrap_or_default(),
+                        ));
+                    }
+                }
+            }
+            out
+        }
+
         /// Helper to check if result contains content
         #[allow(dead_code)]
         pub fn has_content(result: &Annotated<NvCreateChatCompletionStreamResponse>) -> bool {
@@ -2144,6 +2215,169 @@ mod tests {
                 }
             }
         }
+    }
+
+    // DeepSeek V4 interleaved thinking (api-docs.deepseek.com/guides/thinking_mode#tool-calls):
+    // the upstream reasoning parser strips <think> blocks into reasoning-only chunks,
+    // so the jail sees: DSML block 1 → reasoning chunks → DSML block 2 → answer text.
+    // Both blocks must parse, tool-call indices must continue across blocks, and
+    // reasoning deltas must stay ordered between the two tool-call emissions.
+    #[tokio::test]
+    async fn test_deepseek_v4_interleaved_dsml_blocks_with_reasoning_between() {
+        let block1 = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Beijing</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+        let block2 = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_news\">\n<｜DSML｜parameter name=\"topic\" string=\"true\">weather</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+
+        let mut chunks = Vec::new();
+        // Block 1 split mid-marker across chunks
+        let (b1a, b1b) = block1.split_at(40);
+        chunks.push(create_mock_response_chunk(b1a.to_string(), 0));
+        chunks.push(create_mock_response_chunk(b1b.to_string(), 0));
+        // Reasoning between the blocks (reasoning-only chunks, content=None)
+        chunks.push(create_reasoning_chunk("now check ".to_string(), 0));
+        chunks.push(create_reasoning_chunk("the news".to_string(), 0));
+        // Block 2 split across chunks
+        let (b2a, b2b) = block2.split_at(55);
+        chunks.push(create_mock_response_chunk(b2a.to_string(), 0));
+        chunks.push(create_mock_response_chunk(b2b.to_string(), 0));
+        // Trailing reasoning then final answer
+        chunks.push(create_reasoning_chunk("summarize".to_string(), 0));
+        chunks.push(create_mock_response_chunk("Final answer.".to_string(), 0));
+        chunks.push(create_final_response_chunk(0));
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("deepseek_v4")
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(chunks))
+            .collect()
+            .await;
+
+        // Both DSML blocks parsed, indices continue across blocks
+        let tool_calls = collect_tool_call_positions(&results);
+        assert_eq!(
+            tool_calls.len(),
+            2,
+            "expected 2 tool calls, got {:?}",
+            tool_calls
+        );
+        assert_eq!(tool_calls[0].1, 0, "first tool call chunk index");
+        assert_eq!(tool_calls[0].2, "get_weather");
+        assert_eq!(tool_calls[1].1, 1, "second tool call chunk index must continue");
+        assert_eq!(tool_calls[1].2, "get_news");
+
+        // Reasoning preserved in full
+        assert_eq!(reconstruct_reasoning(&results), "now check the newssummarize");
+
+        // Ordering: the between-block reasoning must be emitted after block 1's
+        // tool call and before block 2's.
+        let block1_pos = tool_calls[0].0;
+        let block2_pos = tool_calls[1].0;
+        let mid_reasoning_pos = results
+            .iter()
+            .position(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.delta.reasoning_content.as_deref())
+                    == Some("now check ")
+            })
+            .expect("between-block reasoning delta missing");
+        assert!(
+            block1_pos < mid_reasoning_pos && mid_reasoning_pos < block2_pos,
+            "reasoning delta out of order: block1={}, reasoning={}, block2={}",
+            block1_pos,
+            mid_reasoning_pos,
+            block2_pos
+        );
+
+        // Final answer survives, no DSML markers leak into content
+        let all_content = reconstruct_content(&results);
+        assert_eq!(all_content, "Final answer.");
+
+        // finish_reason rewritten to tool_calls
+        let final_finish = results
+            .iter()
+            .rev()
+            .find_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.finish_reason)
+            })
+            .expect("missing finish_reason");
+        assert_eq!(final_finish, FinishReason::ToolCalls);
+    }
+
+    // A chunk straddling the </think> boundary carries both reasoning_content and
+    // the start of the DSML block. The jail accumulates the content but must not
+    // drop the reasoning that rode in on the same chunk.
+    #[tokio::test]
+    async fn test_deepseek_v4_reasoning_on_jailed_content_chunk() {
+        let block = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Beijing</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+        let (a, b) = block.split_at(30);
+
+        let chunks = vec![
+            // reasoning tail + jail start in one chunk
+            create_mixed_response_chunk(a.to_string(), "let me call the tool".to_string(), 0),
+            create_mock_response_chunk(b.to_string(), 0),
+            create_final_response_chunk(0),
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("deepseek_v4")
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(chunks))
+            .collect()
+            .await;
+
+        let tool_calls = collect_tool_call_positions(&results);
+        assert_eq!(tool_calls.len(), 1, "tool calls: {:?}", tool_calls);
+        assert_eq!(tool_calls[0].2, "get_weather");
+        assert_eq!(
+            reconstruct_reasoning(&results),
+            "let me call the tool",
+            "reasoning arriving on the jail-start chunk must not be dropped"
+        );
+    }
+
+    // Stream ends while jailed (no closing </｜DSML｜tool_calls> marker) with pending
+    // reasoning collected mid-jail: finalize must EOF-recover the tool call and
+    // attach the pending reasoning.
+    #[tokio::test]
+    async fn test_deepseek_v4_stream_ends_jailed_with_pending_reasoning() {
+        let truncated_block = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"city\" string=\"true\">Beijing</｜DSML｜parameter>\n</｜DSML｜invoke>\n";
+
+        let chunks = vec![
+            create_mixed_response_chunk(
+                truncated_block.to_string(),
+                "thinking while calling".to_string(),
+                0,
+            ),
+            // No end marker, no finish chunk — hard EOF
+        ];
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("deepseek_v4")
+            .build();
+        let results: Vec<_> = jail
+            .apply_with_finish_reason(stream::iter(chunks))
+            .collect()
+            .await;
+
+        let tool_calls = collect_tool_call_positions(&results);
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "EOF recovery should parse the truncated block: {:?}",
+            tool_calls
+        );
+        assert_eq!(tool_calls[0].2, "get_weather");
+        assert_eq!(
+            reconstruct_reasoning(&results),
+            "thinking while calling",
+            "pending reasoning must be attached at finalize"
+        );
     }
 
     #[tokio::test]

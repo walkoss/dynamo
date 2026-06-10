@@ -126,10 +126,7 @@ fn render_message(
 
         "assistant" => {
             let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            let reasoning = msg
-                .get("reasoning_content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
+            let reasoning = super::common::extract_reasoning_content(msg).unwrap_or_default();
             let wo_eos = msg.get("wo_eos").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let prev_has_task = index > 0
@@ -142,7 +139,7 @@ fn render_message(
             if thinking_mode == ThinkingMode::Thinking && !prev_has_task {
                 let render_thinking = !drop_thinking || last_user_idx.is_none_or(|u| index > u);
                 if render_thinking {
-                    thinking_part.push_str(reasoning);
+                    thinking_part.push_str(&reasoning);
                     thinking_part.push_str(tokens::THINKING_END);
                 }
             }
@@ -788,5 +785,73 @@ mod tests {
             "reasoning at/after last user/developer (idx 3 > 2) should survive, got:\n{}",
             out
         );
+    }
+
+    // DeepSeek interleaved-thinking passback
+    // (api-docs.deepseek.com/guides/thinking_mode#tool-calls): assistant turns
+    // that performed tool calls must have their reasoning_content re-rendered
+    // into the prompt on subsequent requests. The protocol's Segments form
+    // (`reasoning_content: ["seg1", "seg2"]`, see dynamo-protocols chat.rs)
+    // carries interleaved reasoning and must not be silently dropped.
+
+    #[test]
+    fn test_segments_reasoning_content_on_tool_call_turn_renders() {
+        let messages = json!([
+            {"role": "system", "content": "sys", "tools": [
+                {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}
+            ]},
+            {"role": "user", "content": "Weather in Beijing and Shanghai?"},
+            {"role": "assistant",
+             "reasoning_content": ["check Beijing first", "then Shanghai"],
+             "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Beijing\"}"}},
+                {"id": "call_2", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Shanghai\"}"}}
+             ]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "rain"}
+        ]);
+        let out =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+        assert!(
+            out.contains("check Beijing first") && out.contains("then Shanghai"),
+            "segments-form reasoning_content on a tool-call turn must render into the prompt, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_string_reasoning_content_on_tool_call_turn_renders() {
+        // Spec: tool-call turns keep their reasoning in the prompt even with the
+        // default drop_thinking=true — tools presence auto-disables the drop.
+        let messages = json!([
+            {"role": "system", "content": "sys", "tools": [
+                {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}
+            ]},
+            {"role": "user", "content": "Weather in Beijing?"},
+            {"role": "assistant",
+             "reasoning_content": "PRIOR_TOOL_TURN_REASONING",
+             "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Beijing\"}"}}
+             ]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+        ]);
+        let out =
+            encode_messages(messages.as_array().unwrap(), ThinkingMode::Thinking, true).unwrap();
+        assert!(
+            out.contains("PRIOR_TOOL_TURN_REASONING"),
+            "string-form reasoning_content on a tool-call turn must render, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_typed_protocol_segments_serialize_to_array() {
+        // The typed request path (lib/llm preprocessor) serializes protocol
+        // messages wholesale; Segments must hit the renderer as a JSON array.
+        use dynamo_protocols::types::ReasoningContent;
+        let seg = ReasoningContent::Segments(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(serde_json::to_value(&seg).unwrap(), json!(["a", "b"]));
+        let text = ReasoningContent::Text("a".to_string());
+        assert_eq!(serde_json::to_value(&text).unwrap(), json!("a"));
     }
 }
