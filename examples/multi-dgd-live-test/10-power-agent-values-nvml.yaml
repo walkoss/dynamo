@@ -9,7 +9,7 @@ image:
   # IMAGE NOTE — ephemeral ttl.sh tag (24h TTL). If `helm install` fails
   # with ImagePullBackOff this image likely expired; rebuild + push using
   # "examples/multi-dgd-live-test/README.md § Path-B prerequisites".
-  # Production followup: switch to nvcr.io/nvidia/dynamo/power-agent:vX.Y.Z
+  # Production followup: switch to nvcr.io/nvidia/ai-dynamo/power-agent:vX.Y.Z
   # once the NGC build lands and Findings #1/#2/#5/#6 are addressed
   # upstream (Dockerfile DCGM tag + bindings path + missing logger.py shim).
   # This NVML-pass build used DCGM 3.3.9 bindings (no DCGM-mode in

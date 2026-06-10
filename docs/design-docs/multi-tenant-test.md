@@ -405,7 +405,7 @@ kubectl wait deploy -n kaim-dynamo-system \
 helm upgrade --install power-agent \
     deploy/helm/charts/power-agent \
     --namespace kaim-dynamo-system \
-    --set image.repository=nvcr.io/nvidia/dynamo/power-agent \
+    --set image.repository=nvcr.io/nvidia/ai-dynamo/power-agent \
     --set image.tag=v1.2.0 \
     --set "imagePullSecrets[0].name=nvcr-imagepullsecret" \
     --set agent.actuator=nvml \
