@@ -1041,14 +1041,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         return {}
 
     @staticmethod
-    def _response_format_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
-        """Forward OpenAI response_format for SGLang-native structured output."""
-        response_format = request.get("response_format")
-        if response_format is None:
-            return {}
-        return {"response_format": response_format}
-
-    @staticmethod
     def _generate_bootstrap_room() -> int:
         """Generate a unique bootstrap room ID for disaggregated serving.
 

@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_media_urls,
@@ -122,24 +121,6 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     }
 
 
-def test_response_format_kwargs_forwards_openai_response_format():
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "city_result",
-            "schema": {"type": "object"},
-        },
-    }
-
-    assert BaseWorkerHandler._response_format_kwargs(
-        {"response_format": response_format}
-    ) == {"response_format": response_format}
-
-
-def test_response_format_kwargs_omits_absent_field():
-    assert BaseWorkerHandler._response_format_kwargs({}) == {}
-
-
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.use_sglang_tokenizer = use_sglang_tokenizer
@@ -178,6 +159,28 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["n"] == 3
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
+
+
+def test_build_sampling_params_maps_guided_decoding_to_json_schema():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {
+                    "json": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }
+                }
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["json_schema"] == (
+        '{"type": "object", "properties": {"city": {"type": "string"}}}'
+    )
 
 
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():

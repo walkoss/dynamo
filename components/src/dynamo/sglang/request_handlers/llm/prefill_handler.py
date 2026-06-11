@@ -9,7 +9,6 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -145,10 +144,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             logging.debug(
                 f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
             )
-        response_format_kwargs = filter_supported_async_generate_kwargs(
-            self.engine, self._response_format_kwargs(inner_request)
-        )
-
         results = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
@@ -161,7 +156,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             data_parallel_rank=dp_rank,
             **self._session_kwargs(inner_request),
             lora_path=lora_path,
-            **response_format_kwargs,
             **self._priority_kwargs(priority),
         )
 
