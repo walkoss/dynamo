@@ -14,7 +14,7 @@ use crate::protocols::{
     DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
-use crate::sequences::PrefillTokenDeltas;
+use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
@@ -63,6 +63,9 @@ pub enum KvSchedulerError {
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 
+    #[error("failed to book scheduler state: {0}")]
+    BookingFailed(String),
+
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
 }
@@ -108,8 +111,7 @@ pub struct SchedulingRequest {
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
-    pub decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
-    pub prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
+    pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
 
     // Scheduling side effects and lifecycle controls.
     pub update_states: bool,
@@ -176,33 +178,6 @@ impl SchedulingRequest {
         )
     }
 
-    pub(crate) fn prefill_token_deltas(&self) -> PrefillTokenDeltas {
-        if !self.track_prefill_tokens {
-            return PrefillTokenDeltas::none();
-        }
-
-        let by_worker = self
-            .effective_cached_tokens
-            .iter()
-            .map(|(worker, cached_tokens)| {
-                let delta = self
-                    .isl_tokens
-                    .checked_sub(*cached_tokens)
-                    .unwrap_or_else(|| {
-                        tracing::error!(
-                            "prefill_tokens < 0 with ISL {} < cached_tokens {}, returning 0",
-                            self.isl_tokens,
-                            cached_tokens
-                        );
-                        0
-                    });
-                (*worker, delta)
-            })
-            .collect();
-
-        PrefillTokenDeltas::new(self.isl_tokens, by_worker)
-    }
-
     pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
         self.effective_cached_tokens
             .get(&worker)
@@ -217,44 +192,27 @@ impl SchedulingRequest {
             .unwrap_or(0.0)
     }
 
-    #[cfg(test)]
-    pub(crate) fn prefill_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
-        let default_prefill_tokens = if self.track_prefill_tokens {
-            self.isl_tokens
-        } else {
-            0
-        };
-        self.prefill_tokens
-            .get(&worker)
-            .copied()
-            .unwrap_or(default_prefill_tokens)
-    }
-
-    /// Prompt-side load before applying this request's cache-hit credits.
-    pub(crate) fn raw_prefill_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
-        if !self.track_prefill_tokens {
-            return 0;
-        }
-
-        match self.prefill_tokens.get(&worker).copied() {
-            Some(projected_tokens) => {
-                projected_tokens.saturating_add(self.effective_cached_tokens_for(worker))
-            }
-            None => self.isl_tokens,
-        }
+    pub fn worker_load_for(&self, worker: WorkerWithDpRank) -> WorkerLoadProjection {
+        self.worker_loads.get(&worker).copied().unwrap_or_default()
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
         self.isl_tokens.div_ceil(block_size as usize) as u64
     }
 
-    pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) {
+    pub(crate) fn response_is_closed(&self) -> bool {
+        self.resp_tx.as_ref().is_none_or(|tx| tx.is_closed())
+    }
+
+    pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) -> bool {
         let Some(tx) = self.resp_tx.take() else {
             tracing::error!("respond called multiple times on same request");
-            return;
+            return false;
         };
         if tx.send(result).is_err() {
-            tracing::error!("failed to send response to requestor");
+            tracing::debug!("requestor dropped scheduling response");
+            return false;
         }
+        true
     }
 }
