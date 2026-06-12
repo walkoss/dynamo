@@ -36,11 +36,3 @@ runs:
         vcluster delete ${VCLUSTER_NAME} --namespace ${NAMESPACE} || true
         echo "::endgroup::"
 
-    - name: Delete host namespace
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.vcluster_namespace }}
-      run: |
-        echo "::group::Delete namespace $NAMESPACE"
-        kubectl delete namespace ${NAMESPACE} --timeout=120s || true
-        echo "::endgroup::"
