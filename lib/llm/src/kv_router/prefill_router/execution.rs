@@ -108,11 +108,13 @@ impl PrefillRouter {
                     reason,
                     queued_isl_tokens,
                     max_queued_isl_tokens,
+                    potential_cached_tokens,
                 }) => {
                     return PrefillResolveDecision::Backpressure {
                         reason,
                         queued_isl_tokens,
                         max_queued_isl_tokens,
+                        potential_cached_tokens,
                     };
                 }
                 Err(_) => return PrefillResolveDecision::Unavailable,
@@ -388,10 +390,12 @@ impl PrefillRouter {
                         reason,
                         queued_isl_tokens,
                         max_queued_isl_tokens,
+                        potential_cached_tokens,
                     } => Ok(PrefillQueryOutcome::Backpressure {
                         reason,
                         queued_isl_tokens,
                         max_queued_isl_tokens,
+                        potential_cached_tokens,
                     }),
                 }
             }

@@ -88,6 +88,7 @@ pub enum FindBestMatchOutcome {
         reason: RouterBackpressureReason,
         queued_isl_tokens: usize,
         max_queued_isl_tokens: Option<usize>,
+        potential_cached_tokens: Option<usize>,
     },
 }
 
@@ -494,11 +495,13 @@ where
                 reason,
                 queued_isl_tokens,
                 max_queued_isl_tokens,
+                potential_cached_tokens,
             }) => {
                 return Ok(FindBestMatchOutcome::Backpressure {
                     reason,
                     queued_isl_tokens,
                     max_queued_isl_tokens,
+                    potential_cached_tokens,
                 });
             }
             Err(error) => return Err(map_scheduler_error(error)),
@@ -591,8 +594,9 @@ where
                 reason,
                 queued_isl_tokens,
                 max_queued_isl_tokens,
+                potential_cached_tokens,
             } => Err(anyhow::anyhow!(
-                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?}, potential_cached_tokens={potential_cached_tokens:?})"
             )),
         }
     }
@@ -1018,10 +1022,12 @@ where
                         reason,
                         queued_isl_tokens,
                         max_queued_isl_tokens,
+                        potential_cached_tokens,
                     }) => RouterResponse::Backpressure {
                         reason,
                         queued_isl_tokens,
                         max_queued_isl_tokens,
+                        potential_cached_tokens,
                     },
                     Err(error) => return Err(error),
                 }

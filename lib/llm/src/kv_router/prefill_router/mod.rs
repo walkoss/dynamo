@@ -182,6 +182,7 @@ impl
                 reason,
                 queued_isl_tokens,
                 max_queued_isl_tokens,
+                potential_cached_tokens,
             } => {
                 // Quick-reject: bubble up as ResourceExhausted so the caller
                 // can return a retryable signal upstream instead of falling
@@ -196,7 +197,7 @@ impl
                 return Err(dynamo_runtime::error::DynamoError::builder()
                     .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
                     .message(format!(
-                        "router backpressure during prefill resolve: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+                        "router backpressure during prefill resolve: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?}, potential_cached_tokens={potential_cached_tokens:?})"
                     ))
                     .build()
                     .into());

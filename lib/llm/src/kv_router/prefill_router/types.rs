@@ -64,6 +64,7 @@ pub(super) enum PrefillResolveDecision {
         reason: RouterBackpressureReason,
         queued_isl_tokens: usize,
         max_queued_isl_tokens: Option<usize>,
+        potential_cached_tokens: Option<usize>,
     },
 }
 
@@ -82,6 +83,7 @@ pub enum PrefillQueryOutcome {
         reason: RouterBackpressureReason,
         queued_isl_tokens: usize,
         max_queued_isl_tokens: Option<usize>,
+        potential_cached_tokens: Option<usize>,
     },
 }
 
