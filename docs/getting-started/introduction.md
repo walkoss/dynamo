@@ -6,7 +6,7 @@ sidebar-title: Introduction
 ---
 
 <p align="left">
-  <a href="./introduction.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+  <a href="./introduction.zh-CN.md" hreflang="zh-CN">简体中文</a>
 </p>
 
 Dynamo is an open-source, high-throughput, low-latency inference framework,

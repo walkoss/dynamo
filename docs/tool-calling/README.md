@@ -6,7 +6,7 @@ subtitle: Connect Dynamo to external tools and services using Dynamo's built-in 
 ---
 
 <p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+  <a href="./README.zh-CN.md" hreflang="zh-CN">简体中文</a>
 </p>
 
 You can connect Dynamo to external tools and services using tool calling. By

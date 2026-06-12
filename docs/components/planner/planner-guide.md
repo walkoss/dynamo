@@ -5,7 +5,7 @@ title: Planner Guide
 ---
 
 <p align="left">
-  <a href="./planner-guide.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+  <a href="./planner-guide.zh-CN.md" hreflang="zh-CN">简体中文</a>
 </p>
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
