@@ -703,6 +703,8 @@ def _throttle_planner(config, p_workers=2, d_workers=2):
     planner.config = config
     planner._last_power_annotation_sweep_s = 0.0
     planner._force_power_annotations_until_s = 0.0
+    # PSM path: no cached worker_counts this tick, fall back to PSM internals.
+    planner._last_worker_counts = None
     planner._state_machine = Mock(_num_p_workers=p_workers, _num_d_workers=d_workers)
     return planner
 
@@ -775,3 +777,36 @@ class TestPowerAnnotationSweepThrottle:
     def test_disabled_never_sweeps(self):
         planner = _throttle_planner(_throttle_config(interval=60.0, enable=False))
         assert not planner._should_sweep_power_annotations(5000.0, PlannerEffects())
+
+    def test_scale_up_uses_cached_counts_not_psm(self):
+        # Cached worker_counts present -> _scaling_up must read them, NOT the
+        # PSM internals. Stale PSM counts (99) would mask a real scale-up.
+        planner = _throttle_planner(_throttle_config(interval=60.0))
+        planner._last_worker_counts = Mock(ready_num_prefill=2, ready_num_decode=2)
+        planner._state_machine = Mock(_num_p_workers=99, _num_d_workers=99)
+        assert planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        scale_up = PlannerEffects(scale_to=ScalingDecision(num_prefill=4))
+        # 4 > cached 2 -> force; had it read PSM's 99, 4 > 99 would be False.
+        assert planner._should_sweep_power_annotations(1005.0, scale_up)
+
+    def test_orchestrator_path_uses_cached_counts_without_building_psm(self):
+        # Orchestrator path has no PSM. _scaling_up must rely on the cached
+        # counts and must NOT touch the state_machine property (which would
+        # lazily construct a PSM + warm predictors).
+        planner = _throttle_planner(_throttle_config(interval=60.0))
+        planner._state_machine = None
+        planner._last_worker_counts = Mock(ready_num_prefill=1, ready_num_decode=1)
+        planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        scale_up = PlannerEffects(scale_to=ScalingDecision(num_decode=3))
+        assert planner._should_sweep_power_annotations(1005.0, scale_up)
+        # No PSM was constructed as a side effect.
+        assert planner._state_machine is None
+
+    def test_cached_counts_above_decision_do_not_force(self):
+        # Cached counts already at/above the decision -> not a scale-up.
+        planner = _throttle_planner(_throttle_config(interval=60.0))
+        planner._last_worker_counts = Mock(ready_num_prefill=4, ready_num_decode=4)
+        planner._state_machine = None
+        planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        not_up = PlannerEffects(scale_to=ScalingDecision(num_prefill=4, num_decode=2))
+        assert not planner._should_sweep_power_annotations(1010.0, not_up)

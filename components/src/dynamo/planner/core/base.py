@@ -958,25 +958,48 @@ class NativePlannerBase:
                     e,
                 )
 
+    def _current_worker_counts(self) -> tuple[int, int]:
+        """Best-known current (prefill, decode) ready worker counts.
+
+        Prefers ``self._last_worker_counts`` (cached each tick in ``run()``),
+        which is the only count source the orchestrator path has — it has no
+        equivalent of PSM's ``_num_p_workers`` / ``_num_d_workers`` internals.
+        Falls back to those PSM counters only when a state machine already
+        exists; never touches the ``state_machine`` property, which would
+        lazily *construct* a PSM (and warm predictors) on the orchestrator
+        path. Shared by ``_scaling_up`` and ``_log_decision_summary`` so the
+        two can't drift.
+        """
+        if self._last_worker_counts is not None:
+            return (
+                self._last_worker_counts.ready_num_prefill or 0,
+                self._last_worker_counts.ready_num_decode or 0,
+            )
+        if self._state_machine is not None:
+            return (
+                self._state_machine._num_p_workers,
+                self._state_machine._num_d_workers,
+            )
+        return 0, 0
+
     def _scaling_up(self, effects: PlannerEffects) -> bool:
         """True when this tick's decision raises a managed replica count.
 
         A scale-up means the operator will create new worker pods, which start
         without the power-limit annotation; the caller uses this to force a
         prompt annotation sweep instead of waiting out the steady-state
-        throttle. Mirrors the delta logic in _log_decision_summary; scale-downs
-        and holds return False because they create no pods.
+        throttle. Reads current counts via ``_current_worker_counts`` (cached
+        counts first), the same source ``_log_decision_summary`` uses, so the
+        force decision is correct on both the PSM and orchestrator paths.
+        Scale-downs and holds return False because they create no pods.
         """
         decision = effects.scale_to
         if decision is None:
             return False
-        sm = self.state_machine
-        if (
-            decision.num_prefill is not None
-            and decision.num_prefill > sm._num_p_workers
-        ):
+        current_p, current_d = self._current_worker_counts()
+        if decision.num_prefill is not None and decision.num_prefill > current_p:
             return True
-        if decision.num_decode is not None and decision.num_decode > sm._num_d_workers:
+        if decision.num_decode is not None and decision.num_decode > current_d:
             return True
         return False
 
@@ -1050,25 +1073,16 @@ class NativePlannerBase:
     def _log_decision_summary(self, effects: PlannerEffects) -> None:
         """Log a one-line summary of the scaling decision after each tick.
 
-        Current worker counts come from ``self._last_worker_counts``
-        (cached in ``run()``) in both engine paths — the orchestrator
-        path has no equivalent of PSM's ``_num_p_workers`` /
-        ``_num_d_workers`` internals.
+        Current worker counts come from ``_current_worker_counts`` — the
+        cached ``self._last_worker_counts`` (set in ``run()``) in both engine
+        paths, falling back to PSM internals only on the PSM path, since the
+        orchestrator path has no equivalent of PSM's ``_num_p_workers`` /
+        ``_num_d_workers``.
         """
         decision = effects.scale_to
         diag = effects.diagnostics
 
-        if self._last_worker_counts is not None:
-            current_p = self._last_worker_counts.ready_num_prefill or 0
-            current_d = self._last_worker_counts.ready_num_decode or 0
-        elif self._state_machine is not None:
-            # PSM path with no worker_counts this tick — fall back to PSM
-            # internal counters (set by prior ticks' ``_update_inventory``).
-            current_p = self._state_machine._num_p_workers
-            current_d = self._state_machine._num_d_workers
-        else:
-            current_p = 0
-            current_d = 0
+        current_p, current_d = self._current_worker_counts()
 
         rec_p = decision.num_prefill if decision else None
         rec_d = decision.num_decode if decision else None
