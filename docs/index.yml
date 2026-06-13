@@ -39,13 +39,11 @@ navigation:
         path: components/router/router-guide.md
       - section: Disaggregated Serving
         path: features/disaggregated-serving/README.md
-        collapsed: true
         contents:
           - page: Sizing with AIC
             path: features/disaggregated-serving/aiconfigurator.md
       - section: KV Cache Offloading
         path: components/kvbm/kvbm-guide.md
-        collapsed: true
         contents:
           - page: LMCache Integration
             path: integrations/lmcache-integration.md
@@ -57,7 +55,6 @@ navigation:
             path: integrations/kv-events-custom-engines.md
       - section: Advanced User Guides
         path: features/README.md
-        collapsed: true
         contents:
           - page: SLA Autoscaling
             path: kubernetes/autoscaling.md
@@ -68,7 +65,6 @@ navigation:
           - section: Inference Simulation
             path: dynosim/README.md
             slug: dynosim
-            collapsed: true
             contents:
               - page: Live Simulation with Mocker
                 path: dynosim/mocker.md
