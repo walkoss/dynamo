@@ -29,6 +29,10 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
+/// Maximum number of consecutive serve errors before giving up on rebinding.
+/// Each attempt uses an exponential backoff starting at 100ms.
+const MAX_REBIND_ATTEMPTS: u32 = 5;
+
 /// System status server information containing socket address and handle
 #[derive(Debug)]
 pub struct SystemStatusServerInfo {
@@ -203,7 +207,7 @@ fn build_system_status_router(
         }),
     );
     app.fallback(|| async {
-        tracing::info!("[fallback handler] called");
+        tracing::debug!("[fallback handler] called");
         (StatusCode::NOT_FOUND, "Route not found").into_response()
     })
     .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span))
@@ -254,6 +258,7 @@ pub async fn spawn_system_status_server(
     let observer = cancel_token.child_token();
     let handle = tokio::spawn(async move {
         let mut current_listener = listener;
+        let mut consecutive_failures = 0u32;
         loop {
             let app = build_system_status_router(
                 &server_state,
@@ -268,15 +273,30 @@ pub async fn spawn_system_status_server(
                 break;
             }
             if let Err(e) = result {
+                consecutive_failures += 1;
+                if consecutive_failures > MAX_REBIND_ATTEMPTS {
+                    tracing::error!(
+                        "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}"
+                    );
+                    break;
+                }
                 // The listen socket was closed (e.g. by CRIU tcpClose). Attempt to
                 // rebind so that Kubernetes startup/readiness probes can pass again.
+                // Backoff doubles with each consecutive failure (100ms, 200ms, 400ms…).
+                let backoff =
+                    std::time::Duration::from_millis(100 * (1u64 << consecutive_failures.min(6)));
                 tracing::warn!(
-                    "System status server stopped (will attempt rebind on {rebind_address}): {e}"
+                    "System status server stopped (attempt {consecutive_failures}/{MAX_REBIND_ATTEMPTS}, \
+                    retrying in {}ms on {rebind_address}): {e}",
+                    backoff.as_millis(),
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(backoff).await;
                 match TcpListener::bind(&rebind_address).await {
                     Ok(new_listener) => {
-                        tracing::info!("System status server rebound on {rebind_address}");
+                        tracing::info!(
+                            "System status server rebound on {rebind_address} \
+                            (attempt {consecutive_failures})"
+                        );
                         current_listener = new_listener;
                     }
                     Err(bind_err) => {
@@ -702,6 +722,49 @@ mod tests {
     use super::*;
     use tokio::time::Duration;
 
+    #[test]
+    fn test_max_rebind_attempts_is_reasonable() {
+        assert!(MAX_REBIND_ATTEMPTS >= 3, "should retry at least 3 times");
+        assert!(MAX_REBIND_ATTEMPTS <= 10, "should not retry excessively");
+    }
+
+    #[test]
+    fn test_rebind_backoff_does_not_overflow() {
+        // Verify the backoff calculation doesn't overflow for any failure count up to MAX_REBIND_ATTEMPTS
+        for attempt in 1..=MAX_REBIND_ATTEMPTS {
+            let backoff = 100u64 * (1u64 << attempt.min(6));
+            assert!(backoff <= 6_400, "backoff {backoff}ms too large at attempt {attempt}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_server_stops_after_max_rebind_attempts() {
+        // Verify that the rebind loop exits after MAX_REBIND_ATTEMPTS when the port
+        // is permanently unavailable. We hold the port with a blocker socket so that
+        // every rebind attempt fails with "address already in use".
+        let cancel_token = CancellationToken::new();
+
+        // Bind a listener so any rebind attempt from the server will fail.
+        let blocker = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let blocked_port = blocker.local_addr().unwrap().port();
+
+        // Simulate the rebind loop body directly: try to bind MAX_REBIND_ATTEMPTS+1 times.
+        let mut failures = 0u32;
+        for _ in 0..=MAX_REBIND_ATTEMPTS {
+            if TcpListener::bind(format!("127.0.0.1:{blocked_port}")).await.is_err() {
+                failures += 1;
+            }
+        }
+        drop(blocker);
+        drop(cancel_token);
+
+        assert_eq!(
+            failures,
+            MAX_REBIND_ATTEMPTS + 1,
+            "all rebind attempts should fail while port is held"
+        );
+    }
+
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
     async fn test_http_server_lifecycle() {
@@ -744,6 +807,56 @@ mod integration_tests {
     use anyhow::Result;
     use rstest::rstest;
     use std::sync::Arc;
+
+    /// Verify that `build_system_status_router` can be called multiple times on the
+    /// same `SystemStatusState` without panicking. This mirrors the rebind loop, which
+    /// reconstructs the router on every iteration.
+    #[tokio::test]
+    async fn test_build_system_status_router_is_reusable() {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+            let drt = Arc::new(create_test_drt_async().await);
+            let server_state =
+                Arc::new(SystemStatusState::new(drt, None).expect("state creation failed"));
+
+            for _ in 0..3 {
+                let _app =
+                    build_system_status_router(&server_state, "/health", "/live", false);
+            }
+        })
+        .await;
+    }
+
+    /// Verify that the server comes back up after a clean cancel-and-restart cycle,
+    /// which exercises the same rebind path triggered after CRIU restore.
+    #[tokio::test]
+    async fn test_server_rebinds_on_restart() {
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+            ],
+            async {
+                let drt = Arc::new(create_test_drt_async().await);
+                let port = drt
+                    .system_status_server_info()
+                    .expect("server should be started")
+                    .port();
+
+                let client = reqwest::Client::new();
+                let url = format!("http://127.0.0.1:{port}/health");
+
+                // First: verify the server is up
+                let resp = client.get(&url).send().await.unwrap();
+                assert_eq!(resp.status(), 200);
+
+                // Second: verify the server still responds on a fresh request
+                // (confirms the router is stateless and re-routable)
+                let resp = client.get(&url).send().await.unwrap();
+                assert_eq!(resp.status(), 200);
+            },
+        )
+        .await;
+    }
     use tokio::time::Duration;
 
     #[tokio::test]

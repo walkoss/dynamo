@@ -329,6 +329,10 @@ fn validate_nats_server(server: &str) -> Result<(), ValidationError> {
 // TODO(jthomson04): We really shouldn't be hardcoding this.
 const NATS_WORKER_THREADS: usize = 4;
 
+fn nats_connect_err(e: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible.")
+}
+
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
@@ -355,12 +359,7 @@ impl ClientOptions {
             {
                 let options = options.clone();
                 let server = server.clone();
-                async move {
-                    options
-                        .connect(&server)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
-                }
+                async move { options.connect(&server).await.map_err(nats_connect_err) }
             },
             NATS_WORKER_THREADS,
         )
@@ -369,25 +368,24 @@ impl ClientOptions {
         // EAFNOSUPPORT (os error 97) occurs on Kubernetes pods with IPv6 disabled when
         // async-nats resolves the hostname to an IPv6-mapped address. Retry with an
         // explicit IPv4 address so the kernel sees AF_INET instead of AF_INET6.
+        // Note: os error 97 is Linux-specific (EAFNOSUPPORT); CRIU is Linux-only so
+        // this guard is intentionally platform-specific.
         let (client, _) = match first_attempt {
             Ok(c) => c,
             Err(e) if e.to_string().contains("os error 97") => {
                 tracing::warn!(
-                    "NATS connect failed with EAFNOSUPPORT, retrying with IPv4 for {server}"
+                    "NATS connect failed with EAFNOSUPPORT ({e}), retrying with IPv4 for {server}"
                 );
                 let ipv4_server = resolve_nats_server_to_ipv4(&server)
                     .await
                     .ok_or_else(|| {
-                        anyhow::anyhow!("Could not resolve {server} to an IPv4 address: {e}")
+                        anyhow::anyhow!(
+                            "NATS IPv4 fallback failed: could not resolve {server} to an IPv4 address"
+                        )
                     })?;
                 tracing::debug!("NATS IPv4 fallback: {server} -> {ipv4_server}");
                 build_in_runtime(
-                    async move {
-                        options
-                            .connect(&ipv4_server)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
-                    },
+                    async move { options.connect(&ipv4_server).await.map_err(nats_connect_err) },
                     NATS_WORKER_THREADS,
                 )
                 .await?
@@ -934,6 +932,49 @@ pub fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
         "{}_{}.{}-{:x}",
         endpoint_id.namespace, endpoint_id.component, endpoint_id.name, instance_id,
     )
+}
+
+#[cfg(test)]
+mod resolve_ipv4_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn returns_none_for_ipv4_literal() {
+        assert!(resolve_nats_server_to_ipv4("nats://127.0.0.1:4222").await.is_none());
+        assert!(resolve_nats_server_to_ipv4("nats://10.0.0.1:4222").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_none_for_ipv6_literal() {
+        assert!(resolve_nats_server_to_ipv4("nats://[::1]:4222").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_none_for_malformed_url() {
+        assert!(resolve_nats_server_to_ipv4("not-a-url").await.is_none());
+        assert!(resolve_nats_server_to_ipv4("").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolves_localhost_to_loopback_ipv4() {
+        let result = resolve_nats_server_to_ipv4("nats://localhost:4222").await;
+        // None is acceptable in sandboxed CI environments without DNS
+        if let Some(resolved) = result {
+            assert!(
+                resolved.starts_with("nats://127.0.0.1:"),
+                "expected nats://127.0.0.1:..., got {resolved}"
+            );
+            assert!(resolved.ends_with(":4222"), "port should be preserved: {resolved}");
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_non_default_port() {
+        let result = resolve_nats_server_to_ipv4("nats://localhost:5222").await;
+        if let Some(resolved) = result {
+            assert!(resolved.contains(":5222"), "port should be preserved: {resolved}");
+        }
+    }
 }
 
 #[cfg(test)]
