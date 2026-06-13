@@ -180,8 +180,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--num-gpu-blocks-override",
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
-        default=16384,
-        help="Number of GPU blocks for KV cache (default: 16384)",
+        default=None,
+        help="Per-rank number of GPU blocks for the KV cache. If unset, it is "
+        "estimated via aiconfigurator from the model + --aic-system/backend "
+        "(falls back to 16384 when AIC cannot estimate). Set explicitly to "
+        "bypass estimation.",
     )
     parser.add_argument(
         "--block-size",
@@ -329,6 +332,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Attention data-parallel size for AIC latency prediction (default: 1). "
         "Corresponds to the 'dp' dimension in AIC CLI output.",
+    )
+    parser.add_argument(
+        "--kv-cache-memory-fraction",
+        type=float,
+        default=0.9,
+        dest="kv_cache_memory_fraction",
+        help="Fraction of GPU memory budgeted for the KV cache when estimating "
+        "num_gpu_blocks via AIC (default: 0.9). Applied to total memory for "
+        "vllm/sglang and to free memory for trtllm. Ignored when "
+        "--num-gpu-blocks-override is set.",
+    )
+    parser.add_argument(
+        "--gpu-memory-capacity-gb",
+        type=float,
+        default=None,
+        dest="gpu_memory_capacity_gb",
+        help="Per-rank GPU memory capacity in GiB for AIC num_gpu_blocks "
+        "estimation. When set it overrides AIC's known system capacity and "
+        "enables the naive fallback for models AIC cannot build natively. "
+        "Ignored when --num-gpu-blocks-override is set.",
+    )
+    parser.add_argument(
+        "--kv-cache-tolerance",
+        type=float,
+        default=None,
+        dest="kv_cache_tolerance",
+        help="Optional KV-cache safety margin in [0, 1) for AIC num_gpu_blocks "
+        "estimation (e.g. 0.05 reserves 5%% of the budget). Ignored when "
+        "--num-gpu-blocks-override is set.",
     )
     parser.add_argument(
         "--num-workers",

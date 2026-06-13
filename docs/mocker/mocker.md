@@ -73,7 +73,7 @@ python -m dynamo.mocker \
 | `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
 | `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
 | `--model-name` | Derived from model-path | Model name for API responses |
-| `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
+| `--num-gpu-blocks-override` | Auto (AIC) / 16384 | Per-rank number of KV cache blocks. If unset, estimated via `aiconfigurator` from the model + `--aic-system`/backend (falls back to 16384 when AIC can't estimate). Set explicitly to bypass estimation. See [KV-cache sizing via AIC](#kv-cache-sizing-via-aic) |
 | `--block-size` | 64 (`vllm`) / engine-specific | Tokens per KV cache block. For `sglang`, if omitted, the effective page/block size defaults to 1 or to `--sglang-page-size` when provided |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
 | `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
@@ -96,10 +96,13 @@ python -m dynamo.mocker \
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
-| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and replay paths do not use AIC. Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
+| `--aic-perf-model` | False | Use AIC SDK for *latency* prediction instead of interpolated/polynomial models. Opt-in only. (Note: `num_gpu_blocks` *memory* estimation is separate and on by default — see [KV-cache sizing via AIC](#kv-cache-sizing-via-aic).) Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
+| `--kv-cache-memory-fraction` | 0.9 | Fraction of GPU memory budgeted for the KV cache when estimating `num_gpu_blocks` via AIC (applied to total memory for `vllm`/`sglang`, free memory for `trtllm`). Ignored when `--num-gpu-blocks-override` is set |
+| `--gpu-memory-capacity-gb` | Auto (from AIC) | Per-rank GPU memory capacity (GiB) for AIC `num_gpu_blocks` estimation. Overrides AIC's known system capacity and enables the naive fallback for models AIC can't build natively. Ignored when `--num-gpu-blocks-override` is set |
+| `--kv-cache-tolerance` | None | Optional KV-cache safety margin in `[0, 1)` for AIC `num_gpu_blocks` estimation (e.g. `0.05` reserves 5%). Ignored when `--num-gpu-blocks-override` is set |
 | `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
@@ -269,7 +272,30 @@ The AIC model automatically uses `--model-path` and `--engine-type` to select th
 
 Important notes:
 
-- AIC is opt-in. If you do not pass `--aic-perf-model`, `python -m dynamo.mocker` does not use AIC.
+- The AIC *latency* perf model is opt-in. If you do not pass `--aic-perf-model`, `python -m dynamo.mocker` does not use AIC for timing. (AIC *memory* sizing of `num_gpu_blocks` is separate and on by default — see below.)
+
+### KV-cache sizing via AIC
+
+Both `python -m dynamo.mocker` (real-time) and `python -m dynamo.replay` (virtual-clock replay)
+size the per-rank KV cache (`num_gpu_blocks`) from AIC's KV-cache capacity API **by default**,
+independent of `--aic-perf-model`. This makes the simulated KV capacity match what the real engine
+would actually allocate, instead of the historical fixed 16384.
+
+- **Per-rank.** The estimate is for one rank (one GPU / engine instance): `--aic-tp-size` shards the
+  KV cache (more tokens per rank) while `--aic-attention-dp-size` replicates it (each DP rank holds
+  the full per-token KV). The value is used directly per rank and is **not** scaled by
+  `--data-parallel-size` (the mocker's replica count, which is orthogonal).
+- **Activates when** a model + `--aic-system` are known (real-time reads `--model-path`; replay reads
+  the engine-args JSON `aic_model_path`/`aic_system`, with the top-level `--aic-*` flags as
+  fallbacks). The budget uses `--kv-cache-memory-fraction` (default 0.9).
+- **Override.** Set `--num-gpu-blocks-override` (real-time) or a `num_gpu_blocks` field in the
+  engine-args JSON (replay) to use an exact value and skip estimation entirely.
+- **Coverage & fallback.** The native path covers models AIC can build on systems in its perf DB.
+  For other models, pass `--gpu-memory-capacity-gb` to enable AIC's naive fallback. When AIC can't
+  estimate (not installed, unsupported model/system, missing inputs) the mocker logs one WARNING and
+  falls back to 16384 — launches are never blocked.
+- **TRT-LLM** estimation needs an explicit `--aic-backend-version`; without one it falls back to
+  16384.
 - `python -m dynamo.replay` has two separate AIC surfaces:
   - engine timing AIC through `--extra-engine-args` / staged engine JSON
   - router-side prefill-load AIC through top-level `--aic-*` flags plus `router_prefill_load_model="aic"` in `--router-config`

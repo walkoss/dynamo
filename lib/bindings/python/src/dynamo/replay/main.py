@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
+from dynamo._internal.aic import estimate_num_gpu_blocks
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
@@ -49,13 +50,46 @@ def resolve_planner_profile_data(
     return module.resolve_planner_profile_data(planner_profile_data)
 
 
-def _load_engine_args(raw_args: str | None):
+def _maybe_estimate_num_gpu_blocks(engine_args, cli_args):
+    """Size per-rank num_gpu_blocks via AIC when the engine-args JSON omits it.
+
+    AIC config is read from the engine_args' ``aic_*`` fields (the JSON is the
+    engine spec), with top-level ``--aic-*`` CLI flags as fallbacks. Backend
+    defaults to ``vllm`` when unset (MockEngineArgs exposes no engine_type
+    getter). The helper never raises -- it falls back to the existing
+    ``engine_args.num_gpu_blocks`` (the builder default 16384) on any failure.
+    """
+    estimated = estimate_num_gpu_blocks(
+        model_path=engine_args.aic_model_path
+        or getattr(cli_args, "aic_model_path", None),
+        system=engine_args.aic_system or getattr(cli_args, "aic_system", None),
+        backend=engine_args.aic_backend
+        or getattr(cli_args, "aic_backend", None)
+        or "vllm",
+        block_size=engine_args.block_size,
+        max_num_tokens=engine_args.max_num_batched_tokens,
+        max_batch_size=engine_args.max_num_seqs,
+        backend_version=engine_args.aic_backend_version
+        or getattr(cli_args, "aic_backend_version", None),
+        tp_size=engine_args.aic_tp_size or getattr(cli_args, "aic_tp_size", None) or 1,
+        moe_tp_size=engine_args.aic_moe_tp_size,
+        moe_ep_size=engine_args.aic_moe_ep_size,
+        attention_dp_size=engine_args.aic_attention_dp_size or 1,
+        default_num_gpu_blocks=engine_args.num_gpu_blocks,
+    )
+    return engine_args.with_overrides(num_gpu_blocks=estimated)
+
+
+def _load_engine_args(raw_args: str | None, *, cli_args=None):
     if raw_args is None:
         return None
 
     raw = json.loads(raw_args)
     if not isinstance(raw, dict):
         raise ValueError("engine-args must be a JSON object")
+    # An explicit num_gpu_blocks in the args file is an override and wins
+    # verbatim; otherwise estimate it via AIC below.
+    explicit_num_gpu_blocks = "num_gpu_blocks" in raw
     worker_type = raw.pop("worker_type", None)
     if worker_type is not None:
         if "is_prefill" in raw or "is_decode" in raw:
@@ -81,7 +115,10 @@ def _load_engine_args(raw_args: str | None):
                 raw["planner_profile_data"] = str(profile_data_result.npz_path)
             else:
                 del raw["planner_profile_data"]
-    return MockEngineArgs.from_json(json.dumps(raw))
+    engine_args = MockEngineArgs.from_json(json.dumps(raw))
+    if explicit_num_gpu_blocks:
+        return engine_args
+    return _maybe_estimate_num_gpu_blocks(engine_args, cli_args)
 
 
 def _load_aic_perf_config(args: argparse.Namespace):
@@ -486,9 +523,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
 
-    extra_engine_args = _load_engine_args(args.extra_engine_args)
-    prefill_engine_args = _load_engine_args(args.prefill_engine_args)
-    decode_engine_args = _load_engine_args(args.decode_engine_args)
+    extra_engine_args = _load_engine_args(args.extra_engine_args, cli_args=args)
+    prefill_engine_args = _load_engine_args(args.prefill_engine_args, cli_args=args)
+    decode_engine_args = _load_engine_args(args.decode_engine_args, cli_args=args)
+    # No engine-args file given, but the user passed AIC model+system on the CLI:
+    # synthesize a default args object so num_gpu_blocks is still AIC-estimated.
+    if (
+        extra_engine_args is None
+        and prefill_engine_args is None
+        and decode_engine_args is None
+        and getattr(args, "aic_model_path", None)
+        and getattr(args, "aic_system", None)
+    ):
+        extra_engine_args = _maybe_estimate_num_gpu_blocks(MockEngineArgs(), args)
     router_config = (
         KvRouterConfig.from_json(args.router_config)
         if args.router_config is not None

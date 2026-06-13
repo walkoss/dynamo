@@ -62,6 +62,9 @@ def make_args(**overrides):
         "model_path": None,
         "is_prefill_worker": False,
         "is_decode_worker": False,
+        "kv_cache_memory_fraction": 0.9,
+        "gpu_memory_capacity_gb": None,
+        "kv_cache_tolerance": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -274,3 +277,107 @@ def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
     assert engine_args.max_num_seqs is None
     assert engine_args.max_num_batched_tokens is None
     assert engine_args.worker_type == "decode"
+
+
+# --------------------------------------------------------------------------- #
+# AIC-driven num_gpu_blocks estimation (default-on when no explicit override).
+# The shared helper is monkeypatched so these stay hermetic (no perf DB / model).
+# --------------------------------------------------------------------------- #
+
+
+def _patch_estimator(monkeypatch, return_value):
+    """Patch the AIC helper where config.py imports it; record call kwargs."""
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return return_value
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake)
+    return calls
+
+
+def test_num_gpu_blocks_override_skips_aic_estimation(monkeypatch):
+    calls = _patch_estimator(monkeypatch, 99999)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            num_gpu_blocks=4096, model_path="Qwen/Qwen3-0.6B", aic_system="h200_sxm"
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 4096
+    assert calls == []  # explicit override never calls AIC
+
+
+def test_num_gpu_blocks_estimated_when_unset(monkeypatch):
+    calls = _patch_estimator(monkeypatch, 99999)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            num_gpu_blocks=None,
+            model_path="Qwen/Qwen3-0.6B",
+            aic_system="h200_sxm",
+            aic_tp_size=2,
+            aic_attention_dp_size=4,
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 99999
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["model_path"] == "Qwen/Qwen3-0.6B"
+    assert kw["system"] == "h200_sxm"
+    assert kw["backend"] == "vllm"  # falls back to engine_type
+    assert kw["block_size"] == 64  # normalized vllm block size
+    assert kw["max_num_tokens"] == 8192
+    assert kw["max_batch_size"] == 256
+    assert kw["tp_size"] == 2
+    assert kw["attention_dp_size"] == 4
+    assert kw["memory_fraction"] == 0.9
+    # per-rank: never scaled by dp_size
+    assert "dp_size" not in kw
+
+
+def test_num_gpu_blocks_estimation_independent_of_aic_perf_model(monkeypatch):
+    calls = _patch_estimator(monkeypatch, 12345)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            num_gpu_blocks=None,
+            aic_perf_model=False,  # estimation is decoupled from the perf model
+            model_path="Qwen/Qwen3-0.6B",
+            aic_system="h200_sxm",
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 12345
+    assert len(calls) == 1
+
+
+def test_num_gpu_blocks_falls_back_to_default_on_failure(monkeypatch):
+    # The helper itself returns its default (16384) on any failure; build should
+    # carry that through unchanged.
+    _patch_estimator(monkeypatch, 16384)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(num_gpu_blocks=None, model_path=None, aic_system=None)
+    )
+
+    assert engine_args.num_gpu_blocks == 16384
+
+
+def test_aic_backend_flag_drives_estimation_kind(monkeypatch):
+    calls = _patch_estimator(monkeypatch, 555)
+
+    CONFIG.build_mocker_engine_args(
+        make_args(
+            num_gpu_blocks=None,
+            engine_type="vllm",
+            aic_backend="trtllm",  # decouples the AIC backend from the sim engine
+            model_path="m",
+            aic_system="h200_sxm",
+        )
+    )
+
+    assert calls[0]["backend"] == "trtllm"

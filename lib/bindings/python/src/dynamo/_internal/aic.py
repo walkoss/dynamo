@@ -15,12 +15,203 @@ DEFAULT_BACKEND_VERSIONS = {
 }
 DEFAULT_STATIC_STRIDE = 32
 
+# Historical mocker KV-cache block count, used as the fallback when AIC cannot
+# produce a memory estimate (not installed, unsupported model/system, or missing
+# inputs). Mirrors the mocker/replay defaults so behavior is unchanged when AIC
+# estimation is unavailable.
+DEFAULT_NUM_GPU_BLOCKS = 16384
+
+# Backend -> the memory-fraction kind AIC expects. TRT-LLM applies the fraction
+# to FREE memory; vLLM/SGLang apply it to TOTAL memory. Mirrors AIC's own
+# `aiconfigurator.sdk.memory._BACKEND_FRACTION_KIND` so we never pass a kind the
+# backend rejects.
+_MEMORY_FRACTION_KIND = {
+    "trtllm": "of_free",
+    "vllm": "of_total",
+    "sglang": "of_total",
+}
+
+_ONE_GIB = 1 << 30
+
+# Messages already emitted by `_warn_once`, so a multi-worker launch logs each
+# distinct fallback reason once instead of once per worker.
+_WARNED: set[str] = set()
+
 
 def resolve_backend_version(backend_name: str, backend_version: str | None) -> str:
     """Return the pinned backend version used for AIC perf lookups."""
     if backend_version is not None:
         return backend_version
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
+
+
+def _warn_once(message: str) -> None:
+    """Log ``message`` at WARNING level at most once per process."""
+    if message in _WARNED:
+        return
+    _WARNED.add(message)
+    logger.warning("%s", message)
+
+
+def _resolve_gpu_capacity_bytes(system: str, backend: str, version: str) -> int | None:
+    """Per-rank GPU memory capacity (bytes) from AIC's perf-DB SystemSpec.
+
+    Used only for the naive fallback, which (unlike the native path) does not read
+    the SystemSpec itself. ``get_database`` returns ``None`` (it does not raise)
+    for an unknown system/backend/version, so null-check before indexing. Any
+    failure returns ``None`` -> the caller drops to the default block count.
+    """
+    try:
+        from aiconfigurator.sdk import perf_database
+
+        database = perf_database.get_database(
+            system=system, backend=backend, version=version
+        )
+        if database is None:
+            return None
+        capacity = database.system_spec["gpu"]["mem_capacity"]
+        return int(capacity) if capacity and capacity > 0 else None
+    except Exception:  # pragma: no cover - defensive; AIC internals vary by version
+        return None
+
+
+def estimate_num_gpu_blocks(
+    *,
+    model_path: str | None,
+    system: str | None,
+    backend: str | None,
+    block_size: int,
+    max_num_tokens: int | None,
+    max_batch_size: int | None,
+    backend_version: str | None = None,
+    tp_size: int = 1,
+    moe_tp_size: int | None = None,
+    moe_ep_size: int | None = None,
+    attention_dp_size: int = 1,
+    memory_fraction: float = 0.9,
+    gpu_memory_capacity_gb: float | None = None,
+    tolerance_fraction: float | None = None,
+    default_num_gpu_blocks: int = DEFAULT_NUM_GPU_BLOCKS,
+) -> int:
+    """Estimate the per-rank KV-cache GPU block count via AIC's memory API.
+
+    Wraps ``aiconfigurator.sdk.memory.estimate_num_gpu_blocks`` (PR #1201). The
+    estimate is **per rank** (per single GPU / engine instance): ``tp_size`` shards
+    the KV cache (more tokens per rank), while ``attention_dp_size`` replicates it
+    (each DP rank holds the full per-token KV). The parallel mapping is forwarded
+    verbatim and the per-rank result is returned directly -- callers MUST NOT scale
+    by the mocker's data-parallel replica count, which is orthogonal.
+
+    Never raises: every failure path (AIC missing, unsupported model/system/backend,
+    missing inputs) logs once via :func:`_warn_once` and returns
+    ``default_num_gpu_blocks`` so a launch is never blocked on the estimate.
+
+    Args:
+        backend: ``vllm``/``sglang``/``trtllm``; defaults to ``vllm`` when ``None``.
+            Selects the memory-fraction kind (``of_total`` vs ``of_free``).
+        block_size: scheduler KV block size in tokens (must be positive).
+        gpu_memory_capacity_gb: explicit per-rank GPU capacity. When set it wins
+            over AIC's SystemSpec capacity (on both the native and naive paths) and
+            enables the naive fallback for models AIC cannot build natively.
+        tolerance_fraction: optional KV safety margin in ``[0, 1)``.
+    """
+    if not model_path or not system:
+        _warn_once(
+            "AIC num_gpu_blocks estimation skipped (model_path/system not set); "
+            f"using default {default_num_gpu_blocks}"
+        )
+        return default_num_gpu_blocks
+    if block_size <= 0:
+        _warn_once(
+            f"AIC num_gpu_blocks estimation skipped (block_size={block_size!r} <= 0); "
+            f"using default {default_num_gpu_blocks}"
+        )
+        return default_num_gpu_blocks
+
+    try:
+        from aiconfigurator.sdk import memory
+    except (ImportError, AttributeError):
+        _warn_once(
+            "aiconfigurator with the sdk.memory API is not installed; "
+            f"using default num_gpu_blocks {default_num_gpu_blocks}"
+        )
+        return default_num_gpu_blocks
+
+    backend = backend or "vllm"
+    version = resolve_backend_version(backend, backend_version)
+    kind = _MEMORY_FRACTION_KIND.get(backend, "of_total")
+    capacity_bytes = (
+        int(gpu_memory_capacity_gb * _ONE_GIB)
+        if gpu_memory_capacity_gb is not None
+        else None
+    )
+    common = dict(
+        scheduler_block_size=block_size,
+        max_num_tokens=max_num_tokens or 8192,
+        max_batch_size=max_batch_size or 256,
+        memory_fraction_kind=kind,
+        memory_fraction_value=memory_fraction,
+        tp_size=tp_size or 1,
+        attention_dp_size=attention_dp_size or 1,
+        moe_tp_size=moe_tp_size,
+        moe_ep_size=moe_ep_size,
+        tolerance_fraction=tolerance_fraction,
+    )
+
+    # Attempt 1: native. Pass the explicit capacity override only if the user gave
+    # one (otherwise None, so AIC uses its exact per-rank SystemSpec capacity).
+    try:
+        return int(
+            memory.estimate_num_gpu_blocks(
+                model_path,
+                system,
+                backend,
+                backend_version=version,
+                gpu_memory_capacity_bytes_override=capacity_bytes,
+                allow_naive_fallback=False,
+                **common,
+            )
+        )
+    except ValueError as native_exc:
+        unsupported = native_exc  # model/system/backend AIC cannot build natively
+    except Exception as native_exc:  # pragma: no cover - defensive
+        _warn_once(
+            f"AIC native num_gpu_blocks estimation errored ({native_exc}); "
+            f"using default {default_num_gpu_blocks}"
+        )
+        return default_num_gpu_blocks
+
+    # Attempt 2: naive fallback. Needs a capacity; use the explicit flag or the
+    # perf-DB SystemSpec (loaded only here, on the unsupported branch).
+    resolved_capacity = capacity_bytes or _resolve_gpu_capacity_bytes(
+        system, backend, version
+    )
+    if resolved_capacity is None:
+        _warn_once(
+            f"AIC could not estimate num_gpu_blocks (native unsupported: {unsupported}) "
+            "and no GPU capacity is available; pass --gpu-memory-capacity-gb to enable "
+            f"the naive fallback. Using default {default_num_gpu_blocks}"
+        )
+        return default_num_gpu_blocks
+    try:
+        return int(
+            memory.estimate_num_gpu_blocks(
+                model_path,
+                system,
+                backend,
+                backend_version=version,
+                gpu_memory_capacity_bytes_override=resolved_capacity,
+                allow_naive_fallback=True,
+                allow_hf_config_download=False,
+                **common,
+            )
+        )
+    except Exception as naive_exc:
+        _warn_once(
+            f"AIC naive num_gpu_blocks fallback failed ({naive_exc}); "
+            f"using default {default_num_gpu_blocks}"
+        )
+        return default_num_gpu_blocks
 
 
 def _load_aiconfigurator():

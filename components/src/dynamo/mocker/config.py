@@ -6,6 +6,7 @@ import json
 import os
 import socket
 
+from dynamo._internal.aic import estimate_num_gpu_blocks
 from dynamo.llm import MockEngineArgs, ModelRuntimeConfig, ReasoningConfig, SglangArgs
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
@@ -70,9 +71,9 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_tp_size = getattr(args, "aic_moe_tp_size", None)
         aic_moe_ep_size = getattr(args, "aic_moe_ep_size", None)
         aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
-    return MockEngineArgs(
+    engine_args = MockEngineArgs(
         engine_type=getattr(args, "engine_type", None) or "vllm",
-        num_gpu_blocks=getattr(args, "num_gpu_blocks", _DEFAULT_NUM_GPU_BLOCKS),
+        num_gpu_blocks=getattr(args, "num_gpu_blocks", None) or _DEFAULT_NUM_GPU_BLOCKS,
         block_size=getattr(args, "block_size", 0) or 0,
         max_num_seqs=getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
         max_num_batched_tokens=getattr(
@@ -100,6 +101,37 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         sglang=_build_sglang_args(args),
         preemption_mode=getattr(args, "preemption_mode", "lifo"),
     )
+
+    # When --num-gpu-blocks-override is not set, size the per-rank KV cache via AIC
+    # from the model + --aic-system/backend. AIC config is read from `args`
+    # directly (not the gated engine_args.aic_* fields) so estimation is
+    # independent of --aic-perf-model. Uses the normalized engine_args.block_size
+    # so the scheduler block size matches what the simulator allocates in; the
+    # helper never raises (it falls back to the current num_gpu_blocks).
+    if getattr(args, "num_gpu_blocks", None) is None:
+        estimated = estimate_num_gpu_blocks(
+            model_path=getattr(args, "model_path", None),
+            system=getattr(args, "aic_system", None),
+            backend=(
+                getattr(args, "aic_backend", None)
+                or getattr(args, "engine_type", None)
+                or "vllm"
+            ),
+            block_size=engine_args.block_size,
+            max_num_tokens=engine_args.max_num_batched_tokens,
+            max_batch_size=engine_args.max_num_seqs,
+            backend_version=getattr(args, "aic_backend_version", None),
+            tp_size=getattr(args, "aic_tp_size", None) or 1,
+            moe_tp_size=getattr(args, "aic_moe_tp_size", None),
+            moe_ep_size=getattr(args, "aic_moe_ep_size", None),
+            attention_dp_size=getattr(args, "aic_attention_dp_size", None) or 1,
+            memory_fraction=getattr(args, "kv_cache_memory_fraction", 0.9),
+            gpu_memory_capacity_gb=getattr(args, "gpu_memory_capacity_gb", None),
+            tolerance_fraction=getattr(args, "kv_cache_tolerance", None),
+            default_num_gpu_blocks=engine_args.num_gpu_blocks,
+        )
+        engine_args = engine_args.with_overrides(num_gpu_blocks=estimated)
+    return engine_args
 
 
 def load_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
