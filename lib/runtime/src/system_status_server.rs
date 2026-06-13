@@ -261,28 +261,34 @@ pub async fn spawn_system_status_server(
     // Spawn the server in the background and return the handle
     let handle = tokio::spawn(async move {
         let mut listener = listener;
-        let mut rebind_attempts = 0;
         'serve: loop {
             let result = axum::serve(listener, app.clone())
                 .with_graceful_shutdown(observer.clone().cancelled_owned())
                 .await;
-
             if observer.is_cancelled() || result.is_ok() {
                 break;
             }
-
-            while rebind_attempts < MAX_REBIND_ATTEMPTS {
-                rebind_attempts += 1;
+            let serve_err = result.err().expect("checked above");
+            for rebind_attempt in 1..=MAX_REBIND_ATTEMPTS {
                 let backoff =
-                    std::time::Duration::from_millis(100 * (1u64 << (rebind_attempts - 1).min(6)));
+                    std::time::Duration::from_millis(100 * (1u64 << (rebind_attempt - 1).min(6)));
+                tracing::warn!(
+                    "System status server error on {rebind_address}; retrying bind \
+                    in {}ms ({rebind_attempt}/{MAX_REBIND_ATTEMPTS}): {serve_err}",
+                    backoff.as_millis(),
+                );
                 tokio::time::sleep(backoff).await;
-
                 match TcpListener::bind(&rebind_address).await {
                     Ok(new_listener) => {
                         listener = new_listener;
                         continue 'serve;
                     }
-                    Err(_) => {}
+                    Err(bind_err) => {
+                        tracing::warn!(
+                            "System status server failed to rebind on {rebind_address} \
+                            ({rebind_attempt}/{MAX_REBIND_ATTEMPTS}): {bind_err}"
+                        );
+                    }
                 }
             }
             tracing::error!(

@@ -35,7 +35,22 @@ pub async fn build_in_runtime<
         })
     });
 
-    let result = rx.await??;
+    let result = rx.await?;
+    match result {
+        Ok(result) => Ok((result, runtime)),
+        Err(err) => {
+            tokio::task::spawn_blocking(move || drop(runtime)).await?;
+            Err(err)
+        }
+    }
+}
 
-    Ok((result, runtime))
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn build_in_runtime_returns_inner_errors() {
+        let result =
+            super::build_in_runtime(async { Err::<(), _>(anyhow::anyhow!("boom")) }, 1).await;
+        assert!(result.is_err());
+    }
 }
