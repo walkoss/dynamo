@@ -270,13 +270,19 @@ impl Client {
 
 async fn resolve_nats_server_to_ipv4(server: &str) -> Option<String> {
     let mut url = Url::parse(server).ok()?;
-    let host = url.host_str()?;
     let port = url.port().unwrap_or(4222);
-    let ipv4_ip = tokio::net::lookup_host((host, port))
-        .await
-        .ok()?
-        .map(|a| a.ip().to_canonical())
-        .find(|ip| ip.is_ipv4())?;
+    let ipv4_ip = match url.host()? {
+        url::Host::Ipv4(ip) => std::net::IpAddr::V4(ip),
+        url::Host::Ipv6(ip) => {
+            let ip = std::net::IpAddr::V6(ip).to_canonical();
+            ip.is_ipv4().then_some(ip)?
+        }
+        url::Host::Domain(host) => tokio::net::lookup_host((host, port))
+            .await
+            .ok()?
+            .map(|a| a.ip().to_canonical())
+            .find(|ip| ip.is_ipv4())?,
+    };
     url.set_host(Some(&ipv4_ip.to_string())).ok()?;
     Some(url.to_string())
 }
@@ -915,7 +921,6 @@ pub fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use figment::Jail;
     use serde::{Deserialize, Serialize};
@@ -925,6 +930,17 @@ mod tests {
         id: u32,
         name: String,
         values: Vec<f64>,
+    }
+
+    #[tokio::test]
+    async fn resolve_nats_server_to_ipv4_preserves_port() {
+        let server = resolve_nats_server_to_ipv4("nats://[::ffff:7f00:1]:5222")
+            .await
+            .expect("IPv4-mapped IPv6 address should resolve");
+        let url = Url::parse(&server).expect("resolved server should remain a valid URL");
+
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port(), Some(5222));
     }
 
     #[test]
