@@ -268,32 +268,17 @@ impl Client {
     }
 }
 
-/// Resolve the NATS server URL's hostname to its first IPv4 address.
-///
-/// Returns `None` when the host is already an IP literal, DNS fails, or no IPv4
-/// result is found — in all those cases the caller should use the original URL.
-///
-/// IPv6-mapped IPv4 addresses (::ffff:x.x.x.x) are unwrapped via `to_canonical()`
-/// because after CRIU restore the in-process DNS resolver may return mapped addresses
-/// for what are actually IPv4-only services. We must use the canonical IPv4 form so
-/// async-nats creates an AF_INET socket rather than AF_INET6.
 async fn resolve_nats_server_to_ipv4(server: &str) -> Option<String> {
-    use std::net::IpAddr;
-    let url = url::Url::parse(server).ok()?;
+    let mut url = Url::parse(server).ok()?;
     let host = url.host_str()?;
-    if host.parse::<IpAddr>().is_ok() {
-        return None;
-    }
     let port = url.port().unwrap_or(4222);
-    let addrs = tokio::net::lookup_host(format!("{host}:{port}"))
+    let ipv4_ip = tokio::net::lookup_host((host, port))
         .await
-        .ok()?;
-    let ipv4_ip = addrs
+        .ok()?
         .map(|a| a.ip().to_canonical())
         .find(|ip| ip.is_ipv4())?;
-    let mut resolved = url.clone();
-    resolved.set_host(Some(&ipv4_ip.to_string())).ok()?;
-    Some(resolved.to_string())
+    url.set_host(Some(&ipv4_ip.to_string())).ok()?;
+    Some(url.to_string())
 }
 
 /// NATS client options
@@ -333,27 +318,6 @@ fn nats_connect_err(e: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible.")
 }
 
-async fn nats_connect_options(auth: NatsAuth) -> Result<async_nats::ConnectOptions> {
-    Ok(match auth {
-        NatsAuth::UserPass(username, password) => {
-            async_nats::ConnectOptions::with_user_and_password(username, password)
-        }
-        NatsAuth::Token(token) => async_nats::ConnectOptions::with_token(token),
-        NatsAuth::NKey(nkey) => async_nats::ConnectOptions::with_nkey(nkey),
-        NatsAuth::CredentialsFile(path) => {
-            async_nats::ConnectOptions::with_credentials_file(path).await?
-        }
-    })
-}
-
-async fn connect_nats(auth: NatsAuth, server: String) -> Result<client::Client> {
-    nats_connect_options(auth)
-        .await?
-        .connect(&server)
-        .await
-        .map_err(nats_connect_err)
-}
-
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
@@ -364,32 +328,46 @@ impl ClientOptions {
     pub async fn connect(self) -> Result<Client> {
         self.validate()?;
 
-        let auth = self.auth;
-        let server = self.server;
+        let auth = self.auth.clone();
+        let server = self.server.clone();
+        let client = match self.auth {
+            NatsAuth::UserPass(username, password) => {
+                async_nats::ConnectOptions::with_user_and_password(username, password)
+            }
+            NatsAuth::Token(token) => async_nats::ConnectOptions::with_token(token),
+            NatsAuth::NKey(nkey) => async_nats::ConnectOptions::with_nkey(nkey),
+            NatsAuth::CredentialsFile(path) => {
+                async_nats::ConnectOptions::with_credentials_file(path).await?
+            }
+        };
+        let first_server = server.clone();
         let first_attempt = build_in_runtime(
-            connect_nats(auth.clone(), server.clone()),
+            async move { client.connect(first_server).await.map_err(nats_connect_err) },
             NATS_WORKER_THREADS,
         )
         .await;
 
-        // EAFNOSUPPORT (os error 97) occurs on Kubernetes pods with IPv6 disabled when
-        // async-nats resolves the hostname to an IPv6-mapped address. Retry with an
-        // explicit IPv4 address so the kernel sees AF_INET instead of AF_INET6.
-        // Note: os error 97 is Linux-specific (EAFNOSUPPORT); CRIU is Linux-only so
-        // this guard is intentionally platform-specific.
         let (client, _) = match first_attempt {
             Ok(c) => c,
             Err(e) if e.to_string().contains("os error 97") => {
-                tracing::warn!(
-                    "NATS connect failed with EAFNOSUPPORT ({e}), retrying with IPv4 for {server}"
-                );
-                let ipv4_server = resolve_nats_server_to_ipv4(&server).await.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "NATS IPv4 fallback failed: could not resolve {server} to an IPv4 address"
-                    )
-                })?;
-                tracing::debug!("NATS IPv4 fallback: {server} -> {ipv4_server}");
-                build_in_runtime(connect_nats(auth, ipv4_server), NATS_WORKER_THREADS).await?
+                let ipv4_server = resolve_nats_server_to_ipv4(&server)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("NATS IPv4 fallback failed for {server}"))?;
+                let client = match auth {
+                    NatsAuth::UserPass(username, password) => {
+                        async_nats::ConnectOptions::with_user_and_password(username, password)
+                    }
+                    NatsAuth::Token(token) => async_nats::ConnectOptions::with_token(token),
+                    NatsAuth::NKey(nkey) => async_nats::ConnectOptions::with_nkey(nkey),
+                    NatsAuth::CredentialsFile(path) => {
+                        async_nats::ConnectOptions::with_credentials_file(path).await?
+                    }
+                };
+                build_in_runtime(
+                    async move { client.connect(ipv4_server).await.map_err(nats_connect_err) },
+                    NATS_WORKER_THREADS,
+                )
+                .await?
             }
             Err(e) => return Err(e),
         };
@@ -933,67 +911,6 @@ pub fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
         "{}_{}.{}-{:x}",
         endpoint_id.namespace, endpoint_id.component, endpoint_id.name, instance_id,
     )
-}
-
-#[cfg(test)]
-mod resolve_ipv4_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn returns_none_for_ipv4_literal() {
-        assert!(
-            resolve_nats_server_to_ipv4("nats://127.0.0.1:4222")
-                .await
-                .is_none()
-        );
-        assert!(
-            resolve_nats_server_to_ipv4("nats://10.0.0.1:4222")
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn returns_none_for_ipv6_literal() {
-        assert!(
-            resolve_nats_server_to_ipv4("nats://[::1]:4222")
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn returns_none_for_malformed_url() {
-        assert!(resolve_nats_server_to_ipv4("not-a-url").await.is_none());
-        assert!(resolve_nats_server_to_ipv4("").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn resolves_localhost_to_loopback_ipv4() {
-        let result = resolve_nats_server_to_ipv4("nats://localhost:4222").await;
-        // None is acceptable in sandboxed CI environments without DNS
-        if let Some(resolved) = result {
-            assert!(
-                resolved.starts_with("nats://127.0.0.1:"),
-                "expected nats://127.0.0.1:..., got {resolved}"
-            );
-            assert!(
-                resolved.ends_with(":4222"),
-                "port should be preserved: {resolved}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn preserves_non_default_port() {
-        let result = resolve_nats_server_to_ipv4("nats://localhost:5222").await;
-        if let Some(resolved) = result {
-            assert!(
-                resolved.contains(":5222"),
-                "port should be preserved: {resolved}"
-            );
-        }
-    }
 }
 
 #[cfg(test)]

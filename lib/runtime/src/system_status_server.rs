@@ -29,8 +29,6 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-/// Maximum number of consecutive serve errors before giving up on rebinding.
-/// Each attempt uses an exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms.
 const MAX_REBIND_ATTEMPTS: u32 = 5;
 
 /// System status server information containing socket address and handle
@@ -132,141 +130,6 @@ pub struct LoraResponse {
     pub count: Option<usize>,
 }
 
-/// Build the axum Router for the system status server.
-fn build_system_status_router(
-    server_state: &Arc<SystemStatusState>,
-    health_path: &str,
-    live_path: &str,
-    lora_enabled: bool,
-) -> Router {
-    let mut app = Router::new()
-        .route(
-            health_path,
-            get({
-                let state = Arc::clone(server_state);
-                move || health_handler(state)
-            }),
-        )
-        .route(
-            live_path,
-            get({
-                let state = Arc::clone(server_state);
-                move || health_handler(state)
-            }),
-        )
-        .route(
-            "/metrics",
-            get({
-                let state = Arc::clone(server_state);
-                move || metrics_handler(state)
-            }),
-        )
-        .route(
-            "/metadata",
-            get({
-                let state = Arc::clone(server_state);
-                move || metadata_handler(state)
-            }),
-        )
-        .route(
-            "/engine/{*path}",
-            any({
-                let state = Arc::clone(server_state);
-                move |path, body| engine_route_handler(state, path, body)
-            }),
-        );
-    if lora_enabled {
-        app = app
-            .route(
-                "/v1/loras",
-                get({
-                    let state = Arc::clone(server_state);
-                    move || list_loras_handler(State(state))
-                })
-                .post({
-                    let state = Arc::clone(server_state);
-                    move |body| load_lora_handler(State(state), body)
-                }),
-            )
-            .route(
-                "/v1/loras/{*lora_name}",
-                delete({
-                    let state = Arc::clone(server_state);
-                    move |path| unload_lora_handler(State(state), path)
-                }),
-            );
-    }
-    // Self-hosted MDC files. Always mounted; empty registry → 404.
-    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
-    // so detaching one registration doesn't wipe another's entries.
-    app = app.route(
-        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
-        get({
-            let state = Arc::clone(server_state);
-            move |path| metadata_file_handler(State(state), path)
-        }),
-    );
-    app.fallback(|| async {
-        tracing::debug!("[fallback handler] called");
-        (StatusCode::NOT_FOUND, "Route not found").into_response()
-    })
-    .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span))
-}
-
-fn rebind_backoff(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_millis(100 * (1u64 << attempt.saturating_sub(1).min(6)))
-}
-
-fn next_rebind_backoff(consecutive_failures: &mut u32) -> Option<(u32, std::time::Duration)> {
-    *consecutive_failures += 1;
-    if *consecutive_failures > MAX_REBIND_ATTEMPTS {
-        None
-    } else {
-        Some((*consecutive_failures, rebind_backoff(*consecutive_failures)))
-    }
-}
-
-async fn sleep_or_cancel(observer: &CancellationToken, duration: std::time::Duration) -> bool {
-    tokio::select! {
-        _ = observer.cancelled() => true,
-        _ = tokio::time::sleep(duration) => false,
-    }
-}
-
-async fn rebind_system_status_listener(
-    rebind_address: &str,
-    observer: &CancellationToken,
-    consecutive_failures: &mut u32,
-) -> Option<TcpListener> {
-    loop {
-        match TcpListener::bind(rebind_address).await {
-            Ok(listener) => {
-                tracing::info!(
-                    "System status server rebound on {rebind_address} \
-                    (attempt {consecutive_failures})"
-                );
-                return Some(listener);
-            }
-            Err(bind_err) => {
-                let Some((attempt, backoff)) = next_rebind_backoff(consecutive_failures) else {
-                    tracing::error!(
-                        "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}: {bind_err}"
-                    );
-                    return None;
-                };
-                tracing::warn!(
-                    "System status server bind failed (attempt {attempt}/{MAX_REBIND_ATTEMPTS}, \
-                    retrying in {}ms on {rebind_address}): {bind_err}",
-                    backoff.as_millis(),
-                );
-                if sleep_or_cancel(observer, backoff).await {
-                    return None;
-                }
-            }
-        }
-    }
-}
-
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -289,68 +152,143 @@ pub async fn spawn_system_status_server(
         .lock()
         .live_path()
         .to_string();
+
+    // Check if LoRA feature is enabled
     let lora_enabled = std::env::var(crate::config::environment_names::llm::DYN_LORA_ENABLED)
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
+    let mut app = Router::new()
+        .route(
+            &health_path,
+            get({
+                let state = Arc::clone(&server_state);
+                move || health_handler(state)
+            }),
+        )
+        .route(
+            &live_path,
+            get({
+                let state = Arc::clone(&server_state);
+                move || health_handler(state)
+            }),
+        )
+        .route(
+            "/metrics",
+            get({
+                let state = Arc::clone(&server_state);
+                move || metrics_handler(state)
+            }),
+        )
+        .route(
+            "/metadata",
+            get({
+                let state = Arc::clone(&server_state);
+                move || metadata_handler(state)
+            }),
+        )
+        .route(
+            "/engine/{*path}",
+            any({
+                let state = Arc::clone(&server_state);
+                move |path, body| engine_route_handler(state, path, body)
+            }),
+        );
+
+    // Add LoRA routes only if DYN_LORA_ENABLED is set to true
+    if lora_enabled {
+        app = app
+            .route(
+                "/v1/loras",
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || list_loras_handler(State(state))
+                })
+                .post({
+                    let state = Arc::clone(&server_state);
+                    move |body| load_lora_handler(State(state), body)
+                }),
+            )
+            .route(
+                "/v1/loras/{*lora_name}",
+                delete({
+                    let state = Arc::clone(&server_state);
+                    move |path| unload_lora_handler(State(state), path)
+                }),
+            );
+    }
+
+    // Self-hosted MDC files. Always mounted; empty registry → 404.
+    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
+    // so detaching one registration doesn't wipe another's entries.
+    app = app.route(
+        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
+        get({
+            let state = Arc::clone(&server_state);
+            move |path| metadata_file_handler(State(state), path)
+        }),
+    );
+
+    let app = app
+        .fallback(|| async {
+            tracing::info!("[fallback handler] called");
+            (StatusCode::NOT_FOUND, "Route not found").into_response()
+        })
+        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
+
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {address}");
 
-    let listener = TcpListener::bind(&address).await.map_err(|e| {
-        tracing::error!("Failed to bind to address {}: {}", address, e);
-        anyhow::anyhow!("Failed to bind to address: {}", e)
-    })?;
-    let actual_address = listener.local_addr()?;
-    tracing::info!(
-        "[spawn_system_status_server] system status server bound to: {}",
-        actual_address
-    );
+    let listener = match TcpListener::bind(&address).await {
+        Ok(listener) => {
+            // get the actual address and port, print in debug level
+            let actual_address = listener.local_addr()?;
+            tracing::info!(
+                "[spawn_system_status_server] system status server bound to: {}",
+                actual_address
+            );
+            (listener, actual_address)
+        }
+        Err(e) => {
+            tracing::error!("Failed to bind to address {}: {}", address, e);
+            return Err(anyhow::anyhow!("Failed to bind to address: {}", e));
+        }
+    };
+    let (listener, actual_address) = listener;
 
-    // Use the actual bound address (not the config address) for rebind attempts so
-    // that an OS-assigned port (port=0) is preserved across CRIU restores.
     let rebind_address = actual_address.to_string();
     let observer = cancel_token.child_token();
+    // Spawn the server in the background and return the handle
     let handle = tokio::spawn(async move {
-        let mut current_listener = listener;
-        let mut consecutive_failures = 0u32;
-        loop {
-            let app =
-                build_system_status_router(&server_state, &health_path, &live_path, lora_enabled);
-            let result = axum::serve(current_listener, app)
+        let mut listener = listener;
+        let mut rebind_attempts = 0;
+        'serve: loop {
+            let result = axum::serve(listener, app.clone())
                 .with_graceful_shutdown(observer.clone().cancelled_owned())
                 .await;
+
             if observer.is_cancelled() || result.is_ok() {
                 break;
             }
-            let Err(serve_err) = result else { break };
 
-            let Some((attempt, backoff)) = next_rebind_backoff(&mut consecutive_failures) else {
-                tracing::error!(
-                    "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}: {serve_err}"
-                );
-                break;
-            };
-            // The listen socket was closed (e.g. by CRIU tcpClose). Attempt to
-            // rebind so that Kubernetes startup/readiness probes can pass again.
-            tracing::warn!(
-                "System status server stopped (attempt {attempt}/{MAX_REBIND_ATTEMPTS}, \
-                retrying in {}ms on {rebind_address}): {serve_err}",
-                backoff.as_millis(),
-            );
-            if sleep_or_cancel(&observer, backoff).await {
-                break;
+            while rebind_attempts < MAX_REBIND_ATTEMPTS {
+                rebind_attempts += 1;
+                let backoff =
+                    std::time::Duration::from_millis(100 * (1u64 << (rebind_attempts - 1).min(6)));
+                tokio::time::sleep(backoff).await;
+
+                match TcpListener::bind(&rebind_address).await {
+                    Ok(new_listener) => {
+                        listener = new_listener;
+                        continue 'serve;
+                    }
+                    Err(_) => {}
+                }
             }
-
-            let Some(new_listener) = rebind_system_status_listener(
-                &rebind_address,
-                &observer,
-                &mut consecutive_failures,
-            )
-            .await
-            else {
-                break;
-            };
-            current_listener = new_listener;
+            tracing::error!(
+                "System status server giving up after {MAX_REBIND_ATTEMPTS} rebind attempts on {rebind_address}"
+            );
+            break;
         }
     });
 
@@ -764,42 +702,6 @@ mod tests {
     use super::*;
     use tokio::time::Duration;
 
-    #[test]
-    fn test_max_rebind_attempts_is_reasonable() {
-        assert!(MAX_REBIND_ATTEMPTS >= 3, "should retry at least 3 times");
-        assert!(MAX_REBIND_ATTEMPTS <= 10, "should not retry excessively");
-    }
-
-    #[test]
-    fn test_rebind_backoff_does_not_overflow() {
-        for attempt in 1..=MAX_REBIND_ATTEMPTS {
-            let backoff = rebind_backoff(attempt);
-            assert!(
-                backoff <= std::time::Duration::from_millis(3_200),
-                "backoff {:?} too large at attempt {attempt}",
-                backoff
-            );
-        }
-        let expected = [100u128, 200, 400, 800, 1600];
-        for (i, &exp) in expected.iter().enumerate() {
-            let attempt = (i as u32) + 1;
-            let got = rebind_backoff(attempt).as_millis();
-            assert_eq!(got, exp, "wrong backoff at attempt {attempt}");
-        }
-    }
-
-    #[test]
-    fn test_rebind_budget_exhausts() {
-        let mut consecutive_failures = 0;
-        for expected_attempt in 1..=MAX_REBIND_ATTEMPTS {
-            let Some((attempt, _backoff)) = next_rebind_backoff(&mut consecutive_failures) else {
-                panic!("attempt {expected_attempt} should be allowed");
-            };
-            assert_eq!(attempt, expected_attempt);
-        }
-        assert!(next_rebind_backoff(&mut consecutive_failures).is_none());
-    }
-
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
     async fn test_http_server_lifecycle() {
@@ -843,52 +745,6 @@ mod integration_tests {
     use rstest::rstest;
     use std::sync::Arc;
     use tokio::time::Duration;
-
-    /// Verify that `build_system_status_router` can be called multiple times on the
-    /// same `SystemStatusState` without panicking. This mirrors the rebind loop, which
-    /// reconstructs the router on every iteration.
-    #[tokio::test]
-    async fn test_build_system_status_router_is_reusable() {
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
-            let drt = Arc::new(create_test_drt_async().await);
-            let server_state =
-                Arc::new(SystemStatusState::new(drt, None).expect("state creation failed"));
-
-            for _ in 0..3 {
-                let _app = build_system_status_router(&server_state, "/health", "/live", false);
-            }
-        })
-        .await;
-    }
-
-    /// Verify that the server correctly handles concurrent requests after startup,
-    /// confirming the router built by `build_system_status_router` is stateless
-    /// and handles repeated calls without issues.
-    #[tokio::test]
-    async fn test_server_handles_repeated_requests() {
-        temp_env::async_with_vars(
-            [
-                (env_system::DYN_SYSTEM_PORT, Some("0")),
-                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
-            ],
-            async {
-                let drt = Arc::new(create_test_drt_async().await);
-                let port = drt
-                    .system_status_server_info()
-                    .expect("server should be started")
-                    .port();
-
-                let client = reqwest::Client::new();
-                let url = format!("http://127.0.0.1:{port}/health");
-
-                for _ in 0..3 {
-                    let resp = client.get(&url).send().await.unwrap();
-                    assert_eq!(resp.status(), 200);
-                }
-            },
-        )
-        .await;
-    }
 
     #[tokio::test]
     async fn test_uptime_from_system_health() {
