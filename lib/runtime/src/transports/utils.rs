@@ -25,10 +25,13 @@ pub async fn build_in_runtime<
     std::thread::spawn(move || {
         runtime_clone.block_on(async move {
             let result = f.await;
+            let keep_alive = result.is_ok();
             tx.send(result)
                 .unwrap_or_else(|_| panic!("This should never happen!"));
 
-            std::future::pending::<()>().await;
+            if keep_alive {
+                std::future::pending::<()>().await;
+            }
         })
     });
 
