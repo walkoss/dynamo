@@ -89,6 +89,7 @@ python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
+  --multimodal-worker \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
@@ -118,6 +119,7 @@ wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m dynamo.sglang \
+  --multimodal-worker \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
