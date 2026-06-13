@@ -268,6 +268,34 @@ impl Client {
     }
 }
 
+/// Resolve the NATS server URL's hostname to its first IPv4 address.
+///
+/// Returns `None` when the host is already an IP literal, DNS fails, or no IPv4
+/// result is found — in all those cases the caller should use the original URL.
+///
+/// IPv6-mapped IPv4 addresses (::ffff:x.x.x.x) are unwrapped via `to_canonical()`
+/// because after CRIU restore the in-process DNS resolver may return mapped addresses
+/// for what are actually IPv4-only services. We must use the canonical IPv4 form so
+/// async-nats creates an AF_INET socket rather than AF_INET6.
+async fn resolve_nats_server_to_ipv4(server: &str) -> Option<String> {
+    use std::net::IpAddr;
+    let url = url::Url::parse(server).ok()?;
+    let host = url.host_str()?;
+    if host.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    let port = url.port().unwrap_or(4222);
+    let addrs = tokio::net::lookup_host(format!("{host}:{port}"))
+        .await
+        .ok()?;
+    let ipv4_ip = addrs
+        .map(|a| a.ip().to_canonical())
+        .find(|ip| ip.is_ipv4())?;
+    let mut resolved = url.clone();
+    resolved.set_host(Some(&ipv4_ip.to_string())).ok()?;
+    Some(resolved.to_string())
+}
+
 /// NATS client options
 ///
 /// This object uses the builder pattern with default values that are evaluates
@@ -311,7 +339,7 @@ impl ClientOptions {
     pub async fn connect(self) -> Result<Client> {
         self.validate()?;
 
-        let client = match self.auth {
+        let options = match self.auth {
             NatsAuth::UserPass(username, password) => {
                 async_nats::ConnectOptions::with_user_and_password(username, password)
             }
@@ -322,16 +350,50 @@ impl ClientOptions {
             }
         };
 
-        let (client, _) = build_in_runtime(
-            async move {
-                client
-                    .connect(self.server)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
+        let server = self.server.clone();
+        let first_attempt = build_in_runtime(
+            {
+                let options = options.clone();
+                let server = server.clone();
+                async move {
+                    options
+                        .connect(&server)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
+                }
             },
             NATS_WORKER_THREADS,
         )
-        .await?;
+        .await;
+
+        // EAFNOSUPPORT (os error 97) occurs on Kubernetes pods with IPv6 disabled when
+        // async-nats resolves the hostname to an IPv6-mapped address. Retry with an
+        // explicit IPv4 address so the kernel sees AF_INET instead of AF_INET6.
+        let (client, _) = match first_attempt {
+            Ok(c) => c,
+            Err(e) if e.to_string().contains("os error 97") => {
+                tracing::warn!(
+                    "NATS connect failed with EAFNOSUPPORT, retrying with IPv4 for {server}"
+                );
+                let ipv4_server = resolve_nats_server_to_ipv4(&server)
+                    .await
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Could not resolve {server} to an IPv4 address: {e}")
+                    })?;
+                tracing::debug!("NATS IPv4 fallback: {server} -> {ipv4_server}");
+                build_in_runtime(
+                    async move {
+                        options
+                            .connect(&ipv4_server)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
+                    },
+                    NATS_WORKER_THREADS,
+                )
+                .await?
+            }
+            Err(e) => return Err(e),
+        };
 
         let js_ctx = jetstream::new(client.clone());
 

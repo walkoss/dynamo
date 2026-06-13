@@ -128,6 +128,87 @@ pub struct LoraResponse {
     pub count: Option<usize>,
 }
 
+/// Build the axum Router for the system status server.
+fn build_system_status_router(
+    server_state: &Arc<SystemStatusState>,
+    health_path: &str,
+    live_path: &str,
+    lora_enabled: bool,
+) -> Router {
+    let mut app = Router::new()
+        .route(
+            health_path,
+            get({
+                let state = Arc::clone(server_state);
+                move || health_handler(state)
+            }),
+        )
+        .route(
+            live_path,
+            get({
+                let state = Arc::clone(server_state);
+                move || health_handler(state)
+            }),
+        )
+        .route(
+            "/metrics",
+            get({
+                let state = Arc::clone(server_state);
+                move || metrics_handler(state)
+            }),
+        )
+        .route(
+            "/metadata",
+            get({
+                let state = Arc::clone(server_state);
+                move || metadata_handler(state)
+            }),
+        )
+        .route(
+            "/engine/{*path}",
+            any({
+                let state = Arc::clone(server_state);
+                move |path, body| engine_route_handler(state, path, body)
+            }),
+        );
+    if lora_enabled {
+        app = app
+            .route(
+                "/v1/loras",
+                get({
+                    let state = Arc::clone(server_state);
+                    move || list_loras_handler(State(state))
+                })
+                .post({
+                    let state = Arc::clone(server_state);
+                    move |body| load_lora_handler(State(state), body)
+                }),
+            )
+            .route(
+                "/v1/loras/{*lora_name}",
+                delete({
+                    let state = Arc::clone(server_state);
+                    move |path| unload_lora_handler(State(state), path)
+                }),
+            );
+    }
+    // Self-hosted MDC files. Always mounted; empty registry → 404.
+    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
+    // so detaching one registration doesn't wipe another's entries.
+    app = app.route(
+        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
+        get({
+            let state = Arc::clone(server_state);
+            move |path| metadata_file_handler(State(state), path)
+        }),
+    );
+    app.fallback(|| async {
+        tracing::info!("[fallback handler] called");
+        (StatusCode::NOT_FOUND, "Route not found").into_response()
+    })
+    .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span))
+}
+
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -150,118 +231,64 @@ pub async fn spawn_system_status_server(
         .lock()
         .live_path()
         .to_string();
-
-    // Check if LoRA feature is enabled
     let lora_enabled = std::env::var(crate::config::environment_names::llm::DYN_LORA_ENABLED)
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
-    let mut app = Router::new()
-        .route(
-            &health_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
-        .route(
-            &live_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
-        .route(
-            "/metrics",
-            get({
-                let state = Arc::clone(&server_state);
-                move || metrics_handler(state)
-            }),
-        )
-        .route(
-            "/metadata",
-            get({
-                let state = Arc::clone(&server_state);
-                move || metadata_handler(state)
-            }),
-        )
-        .route(
-            "/engine/{*path}",
-            any({
-                let state = Arc::clone(&server_state);
-                move |path, body| engine_route_handler(state, path, body)
-            }),
-        );
-
-    // Add LoRA routes only if DYN_LORA_ENABLED is set to true
-    if lora_enabled {
-        app = app
-            .route(
-                "/v1/loras",
-                get({
-                    let state = Arc::clone(&server_state);
-                    move || list_loras_handler(State(state))
-                })
-                .post({
-                    let state = Arc::clone(&server_state);
-                    move |body| load_lora_handler(State(state), body)
-                }),
-            )
-            .route(
-                "/v1/loras/{*lora_name}",
-                delete({
-                    let state = Arc::clone(&server_state);
-                    move |path| unload_lora_handler(State(state), path)
-                }),
-            );
-    }
-
-    // Self-hosted MDC files. Always mounted; empty registry → 404.
-    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
-    // so detaching one registration doesn't wipe another's entries.
-    app = app.route(
-        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
-        get({
-            let state = Arc::clone(&server_state);
-            move |path| metadata_file_handler(State(state), path)
-        }),
-    );
-
-    let app = app
-        .fallback(|| async {
-            tracing::info!("[fallback handler] called");
-            (StatusCode::NOT_FOUND, "Route not found").into_response()
-        })
-        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
-
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {address}");
 
-    let listener = match TcpListener::bind(&address).await {
-        Ok(listener) => {
-            // get the actual address and port, print in debug level
-            let actual_address = listener.local_addr()?;
-            tracing::info!(
-                "[spawn_system_status_server] system status server bound to: {}",
-                actual_address
-            );
-            (listener, actual_address)
-        }
-        Err(e) => {
-            tracing::error!("Failed to bind to address {}: {}", address, e);
-            return Err(anyhow::anyhow!("Failed to bind to address: {}", e));
-        }
-    };
-    let (listener, actual_address) = listener;
+    let listener = TcpListener::bind(&address).await.map_err(|e| {
+        tracing::error!("Failed to bind to address {}: {}", address, e);
+        anyhow::anyhow!("Failed to bind to address: {}", e)
+    })?;
+    let actual_address = listener.local_addr()?;
+    tracing::info!(
+        "[spawn_system_status_server] system status server bound to: {}",
+        actual_address
+    );
 
+    // Use the actual bound address (not the config address) for rebind attempts so
+    // that an OS-assigned port (port=0) is preserved across CRIU restores.
+    let rebind_address = actual_address.to_string();
     let observer = cancel_token.child_token();
-    // Spawn the server in the background and return the handle
     let handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app)
-            .with_graceful_shutdown(observer.cancelled_owned())
-            .await
-        {
-            tracing::error!("System status server error: {e}");
+        let mut current_listener = listener;
+        loop {
+            let app = build_system_status_router(
+                &server_state,
+                &health_path,
+                &live_path,
+                lora_enabled,
+            );
+            let result = axum::serve(current_listener, app)
+                .with_graceful_shutdown(observer.clone().cancelled_owned())
+                .await;
+            if observer.is_cancelled() {
+                break;
+            }
+            if let Err(e) = result {
+                // The listen socket was closed (e.g. by CRIU tcpClose). Attempt to
+                // rebind so that Kubernetes startup/readiness probes can pass again.
+                tracing::warn!(
+                    "System status server stopped (will attempt rebind on {rebind_address}): {e}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                match TcpListener::bind(&rebind_address).await {
+                    Ok(new_listener) => {
+                        tracing::info!("System status server rebound on {rebind_address}");
+                        current_listener = new_listener;
+                    }
+                    Err(bind_err) => {
+                        tracing::error!(
+                            "System status server failed to rebind on {rebind_address}: {bind_err}"
+                        );
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
         }
     });
 
