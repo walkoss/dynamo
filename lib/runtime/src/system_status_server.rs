@@ -213,6 +213,60 @@ fn build_system_status_router(
     .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span))
 }
 
+fn rebind_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(100 * (1u64 << attempt.saturating_sub(1).min(6)))
+}
+
+fn next_rebind_backoff(consecutive_failures: &mut u32) -> Option<(u32, std::time::Duration)> {
+    *consecutive_failures += 1;
+    if *consecutive_failures > MAX_REBIND_ATTEMPTS {
+        None
+    } else {
+        Some((*consecutive_failures, rebind_backoff(*consecutive_failures)))
+    }
+}
+
+async fn sleep_or_cancel(observer: &CancellationToken, duration: std::time::Duration) -> bool {
+    tokio::select! {
+        _ = observer.cancelled() => true,
+        _ = tokio::time::sleep(duration) => false,
+    }
+}
+
+async fn rebind_system_status_listener(
+    rebind_address: &str,
+    observer: &CancellationToken,
+    consecutive_failures: &mut u32,
+) -> Option<TcpListener> {
+    loop {
+        match TcpListener::bind(rebind_address).await {
+            Ok(listener) => {
+                tracing::info!(
+                    "System status server rebound on {rebind_address} \
+                    (attempt {consecutive_failures})"
+                );
+                return Some(listener);
+            }
+            Err(bind_err) => {
+                let Some((attempt, backoff)) = next_rebind_backoff(consecutive_failures) else {
+                    tracing::error!(
+                        "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}: {bind_err}"
+                    );
+                    return None;
+                };
+                tracing::warn!(
+                    "System status server bind failed (attempt {attempt}/{MAX_REBIND_ATTEMPTS}, \
+                    retrying in {}ms on {rebind_address}): {bind_err}",
+                    backoff.as_millis(),
+                );
+                if sleep_or_cancel(observer, backoff).await {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -259,10 +313,7 @@ pub async fn spawn_system_status_server(
     let handle = tokio::spawn(async move {
         let mut current_listener = listener;
         let mut consecutive_failures = 0u32;
-        // Both serve errors and bind errors count against the same budget so that
-        // a permanently unavailable port (e.g. taken after CRIU restore) cannot
-        // keep the loop alive by succeeding at bind but immediately failing at serve.
-        'serve: loop {
+        loop {
             let app =
                 build_system_status_router(&server_state, &health_path, &live_path, lora_enabled);
             let result = axum::serve(current_listener, app)
@@ -272,55 +323,34 @@ pub async fn spawn_system_status_server(
                 break;
             }
             let Err(serve_err) = result else { break };
-            consecutive_failures += 1;
-            if consecutive_failures > MAX_REBIND_ATTEMPTS {
+
+            let Some((attempt, backoff)) = next_rebind_backoff(&mut consecutive_failures) else {
                 tracing::error!(
-                    "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}"
+                    "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}: {serve_err}"
                 );
                 break;
-            }
+            };
             // The listen socket was closed (e.g. by CRIU tcpClose). Attempt to
             // rebind so that Kubernetes startup/readiness probes can pass again.
-            // Backoff doubles with each consecutive failure (100ms, 200ms, 400ms…).
-            let backoff =
-                std::time::Duration::from_millis(100 * (1u64 << (consecutive_failures - 1).min(6)));
             tracing::warn!(
-                "System status server stopped (attempt {consecutive_failures}/{MAX_REBIND_ATTEMPTS}, \
+                "System status server stopped (attempt {attempt}/{MAX_REBIND_ATTEMPTS}, \
                 retrying in {}ms on {rebind_address}): {serve_err}",
                 backoff.as_millis(),
             );
-            tokio::time::sleep(backoff).await;
-            // Retry the bind with the same budget; transient bind failures (e.g. the
-            // port still in TIME_WAIT) also consume an attempt so the loop terminates.
-            current_listener = 'bind: loop {
-                match TcpListener::bind(&rebind_address).await {
-                    Ok(l) => {
-                        tracing::info!(
-                            "System status server rebound on {rebind_address} \
-                            (attempt {consecutive_failures})"
-                        );
-                        break 'bind l;
-                    }
-                    Err(bind_err) => {
-                        consecutive_failures += 1;
-                        if consecutive_failures > MAX_REBIND_ATTEMPTS {
-                            tracing::error!(
-                                "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}: {bind_err}"
-                            );
-                            break 'serve;
-                        }
-                        let backoff = std::time::Duration::from_millis(
-                            100 * (1u64 << (consecutive_failures - 1).min(6)),
-                        );
-                        tracing::warn!(
-                            "System status server bind failed (attempt {consecutive_failures}/{MAX_REBIND_ATTEMPTS}, \
-                            retrying in {}ms on {rebind_address}): {bind_err}",
-                            backoff.as_millis(),
-                        );
-                        tokio::time::sleep(backoff).await;
-                    }
-                }
+            if sleep_or_cancel(&observer, backoff).await {
+                break;
+            }
+
+            let Some(new_listener) = rebind_system_status_listener(
+                &rebind_address,
+                &observer,
+                &mut consecutive_failures,
+            )
+            .await
+            else {
+                break;
             };
+            current_listener = new_listener;
         }
     });
 
@@ -742,33 +772,32 @@ mod tests {
 
     #[test]
     fn test_rebind_backoff_does_not_overflow() {
-        // Mirrors the production formula: 100 * 2^(attempt-1), capped at 2^6
         for attempt in 1..=MAX_REBIND_ATTEMPTS {
-            let backoff = 100u64 * (1u64 << (attempt - 1).min(6));
+            let backoff = rebind_backoff(attempt);
             assert!(
-                backoff <= 3_200,
-                "backoff {backoff}ms too large at attempt {attempt}"
+                backoff <= std::time::Duration::from_millis(3_200),
+                "backoff {:?} too large at attempt {attempt}",
+                backoff
             );
         }
-        // Verify the sequence is exactly 100, 200, 400, 800, 1600
-        let expected = [100u64, 200, 400, 800, 1600];
+        let expected = [100u128, 200, 400, 800, 1600];
         for (i, &exp) in expected.iter().enumerate() {
             let attempt = (i as u32) + 1;
-            let got = 100u64 * (1u64 << (attempt - 1).min(6));
+            let got = rebind_backoff(attempt).as_millis();
             assert_eq!(got, exp, "wrong backoff at attempt {attempt}");
         }
     }
 
-    #[tokio::test]
-    async fn test_bind_fails_while_port_is_held() {
-        // Verify the OS-level invariant the rebind loop relies on: binding to a port
-        // that is already in use returns an error. This is a precondition check, not
-        // a test of the loop itself (which requires integration infrastructure).
-        let holder = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = holder.local_addr().unwrap().port();
-
-        let result = TcpListener::bind(format!("127.0.0.1:{port}")).await;
-        assert!(result.is_err(), "binding a held port should fail");
+    #[test]
+    fn test_rebind_budget_exhausts() {
+        let mut consecutive_failures = 0;
+        for expected_attempt in 1..=MAX_REBIND_ATTEMPTS {
+            let Some((attempt, _backoff)) = next_rebind_backoff(&mut consecutive_failures) else {
+                panic!("attempt {expected_attempt} should be allowed");
+            };
+            assert_eq!(attempt, expected_attempt);
+        }
+        assert!(next_rebind_backoff(&mut consecutive_failures).is_none());
     }
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
