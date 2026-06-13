@@ -259,57 +259,68 @@ pub async fn spawn_system_status_server(
     let handle = tokio::spawn(async move {
         let mut current_listener = listener;
         let mut consecutive_failures = 0u32;
-        loop {
-            let app = build_system_status_router(
-                &server_state,
-                &health_path,
-                &live_path,
-                lora_enabled,
-            );
+        // Both serve errors and bind errors count against the same budget so that
+        // a permanently unavailable port (e.g. taken after CRIU restore) cannot
+        // keep the loop alive by succeeding at bind but immediately failing at serve.
+        'serve: loop {
+            let app =
+                build_system_status_router(&server_state, &health_path, &live_path, lora_enabled);
             let result = axum::serve(current_listener, app)
                 .with_graceful_shutdown(observer.clone().cancelled_owned())
                 .await;
-            if observer.is_cancelled() {
+            if observer.is_cancelled() || result.is_ok() {
                 break;
             }
-            if let Err(e) = result {
-                consecutive_failures += 1;
-                if consecutive_failures > MAX_REBIND_ATTEMPTS {
-                    tracing::error!(
-                        "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}"
-                    );
-                    break;
-                }
-                // The listen socket was closed (e.g. by CRIU tcpClose). Attempt to
-                // rebind so that Kubernetes startup/readiness probes can pass again.
-                // Backoff doubles with each consecutive failure (100ms, 200ms, 400ms…).
-                let backoff = std::time::Duration::from_millis(
-                    100 * (1u64 << (consecutive_failures - 1).min(6)),
+            let Err(serve_err) = result else { break };
+            consecutive_failures += 1;
+            if consecutive_failures > MAX_REBIND_ATTEMPTS {
+                tracing::error!(
+                    "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}"
                 );
-                tracing::warn!(
-                    "System status server stopped (attempt {consecutive_failures}/{MAX_REBIND_ATTEMPTS}, \
-                    retrying in {}ms on {rebind_address}): {e}",
-                    backoff.as_millis(),
-                );
-                tokio::time::sleep(backoff).await;
+                break;
+            }
+            // The listen socket was closed (e.g. by CRIU tcpClose). Attempt to
+            // rebind so that Kubernetes startup/readiness probes can pass again.
+            // Backoff doubles with each consecutive failure (100ms, 200ms, 400ms…).
+            let backoff =
+                std::time::Duration::from_millis(100 * (1u64 << (consecutive_failures - 1).min(6)));
+            tracing::warn!(
+                "System status server stopped (attempt {consecutive_failures}/{MAX_REBIND_ATTEMPTS}, \
+                retrying in {}ms on {rebind_address}): {serve_err}",
+                backoff.as_millis(),
+            );
+            tokio::time::sleep(backoff).await;
+            // Retry the bind with the same budget; transient bind failures (e.g. the
+            // port still in TIME_WAIT) also consume an attempt so the loop terminates.
+            current_listener = 'bind: loop {
                 match TcpListener::bind(&rebind_address).await {
-                    Ok(new_listener) => {
+                    Ok(l) => {
                         tracing::info!(
                             "System status server rebound on {rebind_address} \
                             (attempt {consecutive_failures})"
                         );
-                        current_listener = new_listener;
+                        break 'bind l;
                     }
                     Err(bind_err) => {
-                        tracing::error!(
-                            "System status server failed to rebind on {rebind_address}: {bind_err}"
+                        consecutive_failures += 1;
+                        if consecutive_failures > MAX_REBIND_ATTEMPTS {
+                            tracing::error!(
+                                "System status server giving up after {MAX_REBIND_ATTEMPTS} consecutive failures on {rebind_address}: {bind_err}"
+                            );
+                            break 'serve;
+                        }
+                        let backoff = std::time::Duration::from_millis(
+                            100 * (1u64 << (consecutive_failures - 1).min(6)),
                         );
-                        break;
+                        tracing::warn!(
+                            "System status server bind failed (attempt {consecutive_failures}/{MAX_REBIND_ATTEMPTS}, \
+                            retrying in {}ms on {rebind_address}): {bind_err}",
+                            backoff.as_millis(),
+                        );
+                        tokio::time::sleep(backoff).await;
                     }
                 }
-            } else {
-                break;
-            }
+            };
         }
     });
 
@@ -734,7 +745,10 @@ mod tests {
         // Mirrors the production formula: 100 * 2^(attempt-1), capped at 2^6
         for attempt in 1..=MAX_REBIND_ATTEMPTS {
             let backoff = 100u64 * (1u64 << (attempt - 1).min(6));
-            assert!(backoff <= 3_200, "backoff {backoff}ms too large at attempt {attempt}");
+            assert!(
+                backoff <= 3_200,
+                "backoff {backoff}ms too large at attempt {attempt}"
+            );
         }
         // Verify the sequence is exactly 100, 200, 400, 800, 1600
         let expected = [100u64, 200, 400, 800, 1600];
@@ -812,8 +826,7 @@ mod integration_tests {
                 Arc::new(SystemStatusState::new(drt, None).expect("state creation failed"));
 
             for _ in 0..3 {
-                let _app =
-                    build_system_status_router(&server_state, "/health", "/live", false);
+                let _app = build_system_status_router(&server_state, "/health", "/live", false);
             }
         })
         .await;
