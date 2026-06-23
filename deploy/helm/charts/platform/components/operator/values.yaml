@@ -120,6 +120,9 @@ dynamo:
       # true=always create (use for helm template / GitOps workflows),
       # false=never create
       enabled: null
+      # -- Enable the NIXL telemetry metrics collection on workers.
+      # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
+      nixlTelemetry: false
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"
@@ -142,10 +145,17 @@ metricsService:
   type: ClusterIP
 
 natsAddr: ""
-# natsTLSCAPath: path to the CA certificate used to verify the NATS server TLS
-# certificate. When set, NATS_TLS_CA_CERT_PATH is injected into every DGD pod.
+# natsTLSCAPath: auto-inject NATS_TLS_CA_CERT_PATH into every DGD pod.
 # Example (emissary filemode): /etc/emissary/certs/server/ca.pem
 natsTLSCAPath: ""
+# TCP request-plane TLS — auto-inject DYN_TCP_TLS_* into every DGD pod.
+# Requires a TLS-capable dynamo-vllm-runtime image.
+tcpTLSCertPath: ""
+tcpTLSKeyPath: ""
+tcpTLSCAPath: ""
+tcpTLSClientCertPath: ""
+tcpTLSClientKeyPath: ""
+tcpTLSClientCAPath: ""
 etcdAddr: ""
 
 modelExpressURL: ""
@@ -155,8 +165,11 @@ modelExpressURL: ""
 # namespace. In podMount mode, install one shared snapshot-agent DaemonSet and
 # configure storage below so the operator mounts/ensures namespace-local PVCs.
 checkpoint:
-  # Enable checkpoint/restore functionality
+  # -- Enable checkpoint/restore functionality
   enabled: false
+  # -- Image used by best-effort artifact cleanup Jobs for automatically-created
+  # checkpoints. The image must provide /bin/sh and rm.
+  cleanupImage: busybox:1.36
   # Localhost seccomp profile applied to checkpoint+restore pods to block
   # io_uring (which CRIU cannot dump). The default profile is applied unless
   # seccomp.disabled=true is set. Set seccomp.disabled=true on OpenShift
@@ -208,6 +221,10 @@ webhook:
   # Fail: Reject requests if webhook is unavailable (recommended for production)
   # Ignore: Allow requests if webhook is unavailable
   failurePolicy: Fail
+  # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook.
+  # Defaults to Ignore so a webhook outage falls back to cold-start instead of
+  # blocking workload Pods.
+  podCheckpointRestoreFailurePolicy: Ignore
 
   # Timeout for webhook calls (in seconds)
   timeoutSeconds: 10
