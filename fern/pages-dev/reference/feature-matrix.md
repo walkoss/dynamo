@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Feature Matrix
+subtitle: Compatibility matrix for Dynamo features across the SGLang, TensorRT-LLM, and vLLM backends.
 ---
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
-*Updated for Dynamo v1.2.0*
+*Updated for Dynamo v1.2.1*
 
 **Legend:**
 *   ✅ : Supported
