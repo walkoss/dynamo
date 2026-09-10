@@ -1,0 +1,432 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V4.1-Flash on vLLM via Dynamo, disaggregated 1P1D, B200 (TP=4 per worker,
+# 8 GPUs total), agentic workload (Mooncake trace: 64K median ISL / 400 median OSL,
+# constructed for ~90% prefix reuse).
+#
+# Model: 552B total params (MoE), 8B active per prompt token / 16B per output token.
+# Architecture: CED (Causal Encoder-Decoder) + CSA2 (Compressed Sparse Attention 2).
+# Multimodal: text + images.  Native context: 1,048,576 tokens.
+#
+# Checkpoint: deepseek-ai/DeepSeek-V4.1-Flash — mixed MXFP4/MXFP8 quantization.
+# ~511 GB on disk, ~614 GB VRAM minimum (TP4 = 4×192 = 768 GB).
+#
+# Image: vllm/vllm-openai:deepseekv41-flash-0909 — model-specific vLLM 0.30.0+ build
+# with CED/CSA2/SWA Bounded Replay/DSpark kernels.  ai-dynamo==1.4.2 is pip-installed
+# at worker pod startup.
+# Frontend: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:latest (ai-dynamo baked in).
+#
+# Key model-specific requirements:
+#   - --tokenizer-mode deepseek_v41: new tokenizer mode for V4.1 architecture.
+#   - --moe-backend flashinfer_trtllm: FlashInfer TRT-LLM MoE backend for MXFP4 on B200.
+#   - --speculative-config dspark/5: DSpark speculative decoding (3 stages, 5 draft tokens).
+#   - --language-model-only: skip vision encoder for text-only agentic workload.
+#   - --kv-cache-dtype fp8: FP8 KV cache (E2M1 format for main KV, per V4.1 design).
+#   - KV transfer: NixlConnector over UCX (rc_x + rc + cuda_copy + cuda_ipc) via InfiniBand RDMA.
+#   - InfiniBand RDMA: rdma/rdma_shared_device_a provides direct InfiniBand HCA access
+#     for cross-pod KV transfers via GPUDirect RDMA (DMA-BUF).  No hostIPC needed.
+#   - NCCL IB: NCCL_IB_DISABLE=0, NCCL_IB_HCA=mlx5, NCCL_NET_GDR_LEVEL=5.
+#   - Prefill --max-num-seqs 32: reduced from 64 (agg) to avoid OOM on 260K-token prompts.
+#   - --no-async-scheduling: disabled on both workers for disagg stability (V4-Pro-0813 pattern).
+#   - podAffinity: preferred colocation of P+D workers on the same node.
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-disagg-b200-agentic
+  labels:
+    app.kubernetes.io/name: dsv41-flash-disagg-b200-agentic
+    app.kubernetes.io/part-of: deepseek-v4.1-flash
+    engine: vllm
+    hardware: b200
+    mode: disagg
+spec:
+  backendFramework: vllm
+  env:
+    - name: HF_HOME
+      value: /model-cache
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: TRANSFORMERS_OFFLINE
+      value: "1"
+    - name: HOME
+      value: /tmp
+    - name: VLLM_WORKER_MULTIPROC_METHOD
+      value: spawn
+    - name: VLLM_USE_RUST_FRONTEND
+      value: "1"
+    - name: VLLM_ENGINE_READY_TIMEOUT_S
+      value: "3600"
+    - name: NCCL_CUMEM_ENABLE
+      value: "1"
+    - name: NCCL_NVLS_ENABLE
+      value: "1"
+    - name: NCCL_DEBUG
+      value: WARN
+    - name: NCCL_SOCKET_IFNAME
+      value: eth0
+    - name: GLOO_SOCKET_IFNAME
+      value: eth0
+    - name: NCCL_IB_DISABLE
+      value: "0"
+    - name: NCCL_IB_HCA
+      value: mlx5
+    - name: NCCL_NET_GDR_LEVEL
+      value: "5"
+    - name: PYTHONUNBUFFERED
+      value: "1"
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      runtimeVersionOverride: "1.4.2"
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:latest
+              imagePullPolicy: Always
+              workingDir: /workspace
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -Eeuo pipefail
+                  exec python3 -m dynamo.frontend \
+                    --router-mode kv \
+                    --router-kv-events \
+                    --kv-cache-block-size 256 \
+                    --trust-remote-code \
+                    --http-host 0.0.0.0 \
+                    --http-port 8000
+              ports:
+                - name: http
+                  containerPort: 8000
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: http
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: http
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 360
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+              env:
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+                - name: runtime-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+                readOnly: true
+            - name: runtime-tmp
+              emptyDir: {}
+    - name: VllmPrefillWorker
+      type: prefill
+      replicas: 1
+      runtimeVersionOverride: "1.4.2"
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          affinity:
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - key: nvidia.com/dynamo-graph-deployment-name
+                          operator: In
+                          values: [dsv41-flash-disagg-b200-agentic]
+                    topologyKey: kubernetes.io/hostname
+          containers:
+            - name: main
+              image: vllm/vllm-openai:deepseekv41-flash-0909@sha256:4f3c8bcf6328305b8cb6f61146dbfa125b0b04ae98eef3d091019ec30f564a9b
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -Eeuo pipefail
+                  pip install --no-cache-dir ai-dynamo==1.4.2
+                  ulimit -l unlimited
+                  SPEC_CFG='{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}'
+                  KV_CFG='{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda"}'
+                  KV_EVT='{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}'
+                  exec python3 -m dynamo.vllm \
+                    --model deepseek-ai/DeepSeek-V4.1-Flash \
+                    --served-model-name deepseek-ai/DeepSeek-V4.1-Flash \
+                    --trust-remote-code \
+                    --tensor-parallel-size 4 \
+                    --enable-expert-parallel \
+                    --speculative-config "${SPEC_CFG}" \
+                    --max-model-len 1048576 \
+                    --max-num-seqs 32 \
+                    --max-num-batched-tokens 16384 \
+                    --gpu-memory-utilization 0.92 \
+                    --no-async-scheduling \
+                    --no-enable-flashinfer-autotune \
+                    --enable-prefix-caching \
+                    --enable-chunked-prefill \
+                    --kv-cache-dtype fp8 \
+                    --block-size 256 \
+                    --moe-backend flashinfer_trtllm \
+                    --tokenizer-mode deepseek_v41 \
+                    --language-model-only \
+                    --dyn-reasoning-parser deepseek_v4 \
+                    --dyn-tool-call-parser deepseek_v4 \
+                    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+                    --attention-config '{"use_fp4_indexer_cache":true}' \
+                    --kv-transfer-config "${KV_CFG}" \
+                    --disaggregation-mode prefill \
+                    --kv-events-config "${KV_EVT}"
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  rdma/rdma_shared_device_a: "4"
+                  memory: 750Gi
+                  ephemeral-storage: 20Gi
+                limits:
+                  nvidia.com/gpu: "4"
+                  rdma/rdma_shared_device_a: "4"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add: ["IPC_LOCK", "SYS_RESOURCE"]
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
+              env:
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                - name: VLLM_USE_RUST_FRONTEND
+                  value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "3600"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_DEBUG
+                  value: WARN
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_IB_DISABLE
+                  value: "0"
+                - name: NCCL_IB_HCA
+                  value: mlx5
+                - name: NCCL_NET_GDR_LEVEL
+                  value: "5"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: UCX_TLS
+                  value: rc_x,rc,cuda_copy,cuda_ipc
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+                - name: runtime-tmp
+                  mountPath: /tmp
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+                readOnly: true
+            - name: runtime-tmp
+              emptyDir: {}
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi
+    - name: VllmDecodeWorker
+      type: decode
+      replicas: 1
+      runtimeVersionOverride: "1.4.2"
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          affinity:
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - key: nvidia.com/dynamo-graph-deployment-name
+                          operator: In
+                          values: [dsv41-flash-disagg-b200-agentic]
+                    topologyKey: kubernetes.io/hostname
+          containers:
+            - name: main
+              image: vllm/vllm-openai:deepseekv41-flash-0909@sha256:4f3c8bcf6328305b8cb6f61146dbfa125b0b04ae98eef3d091019ec30f564a9b
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -Eeuo pipefail
+                  pip install --no-cache-dir ai-dynamo==1.4.2
+                  ulimit -l unlimited
+                  SPEC_CFG='{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}'
+                  KV_CFG='{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
+                  exec python3 -m dynamo.vllm \
+                    --model deepseek-ai/DeepSeek-V4.1-Flash \
+                    --served-model-name deepseek-ai/DeepSeek-V4.1-Flash \
+                    --trust-remote-code \
+                    --tensor-parallel-size 4 \
+                    --enable-expert-parallel \
+                    --speculative-config "${SPEC_CFG}" \
+                    --max-model-len 1048576 \
+                    --max-num-seqs 256 \
+                    --max-num-batched-tokens 16384 \
+                    --gpu-memory-utilization 0.92 \
+                    --no-async-scheduling \
+                    --no-enable-flashinfer-autotune \
+                    --enable-prefix-caching \
+                    --enable-chunked-prefill \
+                    --kv-cache-dtype fp8 \
+                    --block-size 256 \
+                    --moe-backend flashinfer_trtllm \
+                    --tokenizer-mode deepseek_v41 \
+                    --language-model-only \
+                    --dyn-reasoning-parser deepseek_v4 \
+                    --dyn-tool-call-parser deepseek_v4 \
+                    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+                    --attention-config '{"use_fp4_indexer_cache":true}' \
+                    --kv-transfer-config "${KV_CFG}" \
+                    --disaggregation-mode decode
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  rdma/rdma_shared_device_a: "4"
+                  memory: 750Gi
+                  ephemeral-storage: 20Gi
+                limits:
+                  nvidia.com/gpu: "4"
+                  rdma/rdma_shared_device_a: "4"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add: ["IPC_LOCK", "SYS_RESOURCE"]
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
+              env:
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                - name: VLLM_USE_RUST_FRONTEND
+                  value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "3600"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_DEBUG
+                  value: WARN
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_IB_DISABLE
+                  value: "0"
+                - name: NCCL_IB_HCA
+                  value: mlx5
+                - name: NCCL_NET_GDR_LEVEL
+                  value: "5"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: UCX_TLS
+                  value: rc_x,rc,cuda_copy,cuda_ipc
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+                - name: runtime-tmp
+                  mountPath: /tmp
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+                readOnly: true
+            - name: runtime-tmp
+              emptyDir: {}
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi

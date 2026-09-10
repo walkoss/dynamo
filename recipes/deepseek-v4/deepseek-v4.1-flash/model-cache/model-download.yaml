@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 14400
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-B200
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: downloader
+          image: vllm/vllm-openai:deepseekv41-flash-0909@sha256:4f3c8bcf6328305b8cb6f61146dbfa125b0b04ae98eef3d091019ec30f564a9b
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              rm -rf /model-cache/hub/.locks/ 2>/dev/null || true
+              hf download deepseek-ai/DeepSeek-V4.1-Flash
+              echo "Download complete"
+              du -sh /model-cache/hub/
+          env:
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          resources:
+            requests:
+              memory: 16Gi
+            limits:
+              memory: 16Gi
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+      restartPolicy: Never
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
